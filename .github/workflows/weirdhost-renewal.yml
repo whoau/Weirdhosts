@@ -57,3 +57,5 @@ jobs:
             git commit -m "docs: 自动更新 Weirdhost 续期状态"
             git push
           fi
+permissions:
+  contents: write
