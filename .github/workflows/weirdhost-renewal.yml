@@ -38,7 +38,7 @@ jobs:
 
       # 步骤 5: 运行续期脚本
       - name: Run renewal script
-        run: python weirdhost_login.py # 确保你的 Python 脚本名为 weirdhost_login.py
+        run: python weirdhost.py # 确保你的 Python 脚本名为 weirdhost_login.py
         env:
           WEIRDHOST_SERVER_URLS: ${{ secrets.WEIRDHOST_SERVER_URLS }}
           REMEMBER_WEB_COOKIE: ${{ secrets.REMEMBER_WEB_COOKIE }}
