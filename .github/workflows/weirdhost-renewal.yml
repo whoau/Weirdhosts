@@ -1,0 +1,62 @@
+# .github/workflows/weirdhost-renewal.yml
+
+name: Weirdhost 自动续期
+
+on:
+  # 允许手动触发此工作流
+  workflow_dispatch:
+
+  # 设置定时任务，在每天的 UTC 时间 2:00 运行
+  # UTC 2:00 对应北京时间（UTC+8）的上午 10:00
+  schedule:
+    - cron: '0 2 * * *'
+
+jobs:
+  run-renewal:
+    runs-on: ubuntu-latest
+    steps:
+      # 步骤 1: 检出你的仓库代码
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 步骤 2: 设置 Python 环境
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10' # 使用 Python 3.10 版本
+
+      # 步骤 3: 安装 Python 依赖
+      # 依赖项需要写在 requirements.txt 文件中
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      # 步骤 4: 安装 Playwright 所需的浏览器和系统依赖
+      - name: Install Playwright browsers
+        run: playwright install --with-deps
+
+      # 步骤 5: 运行续期脚本
+      # 从 GitHub Secrets 中读取敏感信息并作为环境变量传入脚本
+      - name: Run renewal script
+        run: python weirdhost_login.py # 确保你的 Python 脚本名为 weirdhost_login.py
+        env:
+          WEIRDHOST_SERVER_URLS: ${{ secrets.WEIRDHOST_SERVER_URLS }}
+          # --- 认证信息二选一 ---
+          REMEMBER_WEB_COOKIE: ${{ secrets.REMEMBER_WEB_COOKIE }}
+          WEIRDHOST_EMAIL: ${{ secrets.WEIRDHOST_EMAIL }}
+          WEIRDHOST_PASSWORD: ${{ secrets.WEIRDHOST_PASSWORD }}
+
+      # 步骤 6: 将更新后的 README.md 文件提交回仓库
+      - name: Commit and push README.md
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add README.md
+          # 检查是否有文件变动，只有在 README.md 更新时才执行提交
+          if git diff --staged --quiet; then
+            echo "没有检测到 README.md 的变动，无需提交。"
+          else
+            git commit -m "docs: 自动更新 Weirdhost 续期状态"
+            git push
+          fi
