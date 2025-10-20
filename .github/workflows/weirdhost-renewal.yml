@@ -1,61 +1,76 @@
-# .github/workflows/weirdhost-renewal.yml
+# .github/workflows/main.yml
 
-name: Weirdhost 自动续期
+name: Weirdhost Auto Renew
 
 on:
-  # 允许手动触发此工作流
-  workflow_dispatch:
-
-  # 设置定时任务，在每天的 UTC 时间 2:00 运行
-  # UTC 2:00 对应北京时间（UTC+8）的上午 10:00
+  # 1. 定时触发：每天 UTC 时间 0点 (对应北京时间早上8点)
   schedule:
     - cron: '0 2 * * *'
+  
+  # 2. 手动触发：允许你在 Actions 页面点击 "Run workflow"
+  workflow_dispatch:
 
 jobs:
-  run-renewal:
+  renew-and-report:
     runs-on: ubuntu-latest
+
+    # 关键步骤：授予工作流写入仓库内容的权限，以解决 git push 403 错误
+    permissions:
+      contents: write
+
     steps:
-      # 步骤 1: 检出你的仓库代码
+      # 第 1 步：检出你的代码库
+      # 使用 actions/checkout@v4，这是当前最新版本
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 步骤 2: 设置 Python 环境
+      # 第 2 步：设置 Python 环境
+      # 使用 actions/setup-python@v5，并指定一个稳定的 Python 版本
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.10' # 你也可以用 '3.9', '3.11' 等
 
-      # 步骤 3: 安装 Python 依赖 (直接安装 playwright)
-      # 修正：不再读取 requirements.txt，而是直接安装 playwright 库
-      - name: Install Python dependencies
+      # 第 3 步：安装 Playwright 及其依赖
+      # Playwright 需要一个单独的步骤来安装浏览器
+      - name: Install dependencies and Playwright browsers
         run: |
-          python -m pip install --upgrade pip
           pip install playwright
-      
-      # 步骤 4: 安装 Playwright 所需的浏览器和系统依赖
-      - name: Install Playwright browsers
-        run: playwright install --with-deps
+          python -m playwright install --with-deps
 
-      # 步骤 5: 运行续期脚本
-      - name: Run renewal script
-        run: python weirdhost.py # 确保你的 Python 脚本名为 weirdhost_login.py
+      # 第 4 步：运行你的 Python 脚本
+      # 从 GitHub Secrets 中读取环境变量并传递给脚本
+      - name: Run Weirdhost renew script
+        run: python weirdhost.py # 确保你的脚本文件名是 weirdhost.py
         env:
-          WEIRDHOST_SERVER_URLS: ${{ secrets.WEIRDHOST_SERVER_URLS }}
+          # --- 必须在这里配置你的 Secrets ---
           REMEMBER_WEB_COOKIE: ${{ secrets.REMEMBER_WEB_COOKIE }}
+          WEIRDHOST_SERVER_URLS: ${{ secrets.WEIRDHOST_SERVER_URLS }}
+          
+          # --- 以下是可选的，但强烈建议配置 ---
+          PTERODACTYL_SESSION: ${{ secrets.PTERODACTYL_SESSION }}
           WEIRDHOST_EMAIL: ${{ secrets.WEIRDHOST_EMAIL }}
           WEIRDHOST_PASSWORD: ${{ secrets.WEIRDHOST_PASSWORD }}
 
-      # 步骤 6: 将更新后的 README.md 文件提交回仓库
-      - name: Commit and push README.md
+      # 第 5 步：提交并推送 README.md 的变动
+      # 这个步骤会在脚本更新 README.md 后，自动将其提交回你的仓库
+      - name: Commit and push if README.md changed
         run: |
+          # 配置 Git 用户信息
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
+          
+          # 将变动的文件添加到暂存区
           git add README.md
+          
+          # 检查是否有文件变动，如果没有则跳过提交
           if git diff --staged --quiet; then
             echo "没有检测到 README.md 的变动，无需提交。"
           else
+            # 提交变动
             git commit -m "docs: 自动更新 Weirdhost 续期状态"
+            
+            # 推送到远程仓库
             git push
+            echo "README.md 已更新并成功推送到仓库。"
           fi
-permissions:
-  contents: write
