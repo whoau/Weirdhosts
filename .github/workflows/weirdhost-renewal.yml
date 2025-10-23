@@ -1,33 +1,43 @@
 name: Weirdhost Auto Renew
 
 on:
-  # 每天 UTC 0 点（北京时间 8 点）
+  # 每天北京时间 11:00 运行（UTC 03:00）
   schedule:
     - cron: '0 3 * * *'
+  # 允许手动触发
   workflow_dispatch:
 
 jobs:
-  renew-and-report:
+  # 定时任务：跑脚本 + 推 README
+  renew-scheduled:
+    if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-
-    # 允许推送 README 变更
+    timeout-minutes: 25
     permissions:
-      contents: write
-
-    # 防止并发重叠
+      contents: write   # 允许推 README
+    # 定时和手动分开并发组，互不阻塞
     concurrency:
-      group: weirdhost-renew
+      group: weirdhost-renew-schedule
       cancel-in-progress: true
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Debug trigger/time
+        run: |
+          echo "event=$GITHUB_EVENT_NAME"
+          echo "ref=$GITHUB_REF"
+          echo "--- UTC ---"
+          date -u
+          echo "--- Asia/Shanghai ---"
+          TZ=Asia/Shanghai date
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+          cache: 'pip'
 
       - name: Install dependencies and Playwright browsers
         run: |
@@ -36,7 +46,7 @@ jobs:
           python -m playwright install --with-deps chromium
 
       - name: Run Weirdhost renew script
-        run: python weirdhost.py  # 确保文件名与仓库一致
+        run: python weirdhost.py
         env:
           REMEMBER_WEB_COOKIE: ${{ secrets.REMEMBER_WEB_COOKIE }}
           WEIRDHOST_SERVER_URLS: ${{ secrets.WEIRDHOST_SERVER_URLS }}
@@ -44,7 +54,7 @@ jobs:
           WEIRDHOST_EMAIL: ${{ secrets.WEIRDHOST_EMAIL }}
           WEIRDHOST_PASSWORD: ${{ secrets.WEIRDHOST_PASSWORD }}
           HEADLESS: "true"
-          # 如果不是默认域名，取消下一行注释
+          # 如需自定义面板域名，取消下一行注释并修改
           # WEIRDHOST_URL: "https://hub.weirdhost.xyz"
 
       - name: Commit and push if README.md changed
@@ -52,6 +62,7 @@ jobs:
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
+          git pull --rebase
           git add README.md
           if git diff --staged --quiet; then
             echo "没有检测到 README.md 的变动，无需提交。"
@@ -60,3 +71,50 @@ jobs:
             git push
             echo "README.md 已更新并成功推送到仓库。"
           fi
+
+  # 手动任务：只跑脚本，不推 README，避免与定时冲突
+  renew-manual:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    concurrency:
+      group: weirdhost-renew-manual
+      cancel-in-progress: true
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Debug trigger/time
+        run: |
+          echo "event=$GITHUB_EVENT_NAME"
+          echo "ref=$GITHUB_REF"
+          echo "--- UTC ---"
+          date -u
+          echo "--- Asia/Shanghai ---"
+          TZ=Asia/Shanghai date
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install dependencies and Playwright browsers
+        run: |
+          python -m pip install --upgrade pip
+          pip install playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Run Weirdhost renew script
+        run: python weirdhost.py
+        env:
+          REMEMBER_WEB_COOKIE: ${{ secrets.REMEMBER_WEB_COOKIE }}
+          WEIRDHOST_SERVER_URLS: ${{ secrets.WEIRDHOST_SERVER_URLS }}
+          PTERODACTYL_SESSION: ${{ secrets.PTERODACTYL_SESSION }}
+          WEIRDHOST_EMAIL: ${{ secrets.WEIRDHOST_EMAIL }}
+          WEIRDHOST_PASSWORD: ${{ secrets.WEIRDHOST_PASSWORD }}
+          HEADLESS: "true"
+          # WEIRDHOST_URL: "https://hub.weirdhost.xyz"
