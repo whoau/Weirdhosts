@@ -1,10 +1,10 @@
 name: Weirdhost Auto Renew
 
 on:
-  # 每天北京时间 11:00 运行（UTC 03:00）
+  # 每天北京时间 11:00（UTC 03:00）
   schedule:
-    - cron: '0 4 * * *'
-  # 允许手动触发
+    - cron: '0 3 * * *'
+  # 支持手动触发
   workflow_dispatch:
 
 jobs:
@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 25
     permissions:
       contents: write   # 允许推 README
-    # 定时和手动分开并发组，互不阻塞
+    # 定时和手动用不同并发组，互不阻塞
     concurrency:
       group: weirdhost-renew-schedule
       cancel-in-progress: true
@@ -28,16 +28,13 @@ jobs:
         run: |
           echo "event=$GITHUB_EVENT_NAME"
           echo "ref=$GITHUB_REF"
-          echo "--- UTC ---"
-          date -u
-          echo "--- Asia/Shanghai ---"
-          TZ=Asia/Shanghai date
+          echo "--- UTC ---"; date -u
+          echo "--- Asia/Shanghai ---"; TZ=Asia/Shanghai date
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
-          cache: 'pip'
+          python-version: '3.10'   # 不用 cache，避免 requirements.txt 报错
 
       - name: Install dependencies and Playwright browsers
         run: |
@@ -54,14 +51,14 @@ jobs:
           WEIRDHOST_EMAIL: ${{ secrets.WEIRDHOST_EMAIL }}
           WEIRDHOST_PASSWORD: ${{ secrets.WEIRDHOST_PASSWORD }}
           HEADLESS: "true"
-          # 如需自定义面板域名，取消下一行注释并修改
+          # 如需自定义面板域名，取消下一行注释
           # WEIRDHOST_URL: "https://hub.weirdhost.xyz"
 
       - name: Commit and push if README.md changed
         if: always()
         run: |
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
+          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git pull --rebase
           git add README.md
           if git diff --staged --quiet; then
@@ -91,16 +88,13 @@ jobs:
         run: |
           echo "event=$GITHUB_EVENT_NAME"
           echo "ref=$GITHUB_REF"
-          echo "--- UTC ---"
-          date -u
-          echo "--- Asia/Shanghai ---"
-          TZ=Asia/Shanghai date
+          echo "--- UTC ---"; date -u
+          echo "--- Asia/Shanghai ---"; TZ=Asia/Shanghai date
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          cache: 'pip'
 
       - name: Install dependencies and Playwright browsers
         run: |
