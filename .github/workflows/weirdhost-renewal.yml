@@ -23,6 +23,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # rebase 需要完整历史
 
       - name: Debug trigger/time
         run: |
@@ -55,19 +57,27 @@ jobs:
           # WEIRDHOST_URL: "https://hub.weirdhost.xyz"
 
       - name: Commit and push if README.md changed
-        if: always()
+        if: success()   # 脚本成功才提交；若要无论成功失败都提交，改为 always()
         run: |
+          set -e
           git config --local user.name "github-actions[bot]"
           git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git pull --rebase
+
+          # 先提交本地变更，避免 pull 时出现“unstaged changes”报错
           git add README.md
           if git diff --staged --quiet; then
             echo "没有检测到 README.md 的变动，无需提交。"
-          else
-            git commit -m "docs: 自动更新 Weirdhost 续期状态 [skip ci]"
-            git push
-            echo "README.md 已更新并成功推送到仓库。"
+            exit 0
           fi
+
+          git commit -m "docs: 自动更新 Weirdhost 续期状态 [skip ci]"
+
+          # 再拉取并 rebase，--autostash 以防仍有未暂存改动
+          git pull --rebase --autostash origin "${{ github.ref_name }}"
+
+          # 推回同一分支
+          git push origin HEAD:"${{ github.ref_name }}"
+          echo "README.md 已更新并成功推送到仓库。"
 
   # 手动任务：只跑脚本，不推 README，避免与定时冲突
   renew-manual:
@@ -83,6 +93,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Debug trigger/time
         run: |
