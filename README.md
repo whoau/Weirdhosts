@@ -1,3 +1,7 @@
+settings actions里面，添加一下两个参数就可以使用
+REMEMBER WEB COOKIE
+WEIRDHOST SERVER URLS
+
 # Weirdhost 自动续期报告
 
 **最后更新时间**: `2025-11-21 11:43:22` (北京时间)
