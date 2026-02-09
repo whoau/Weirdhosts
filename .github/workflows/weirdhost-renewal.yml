@@ -1,126 +1,80 @@
-name: Weirdhost Auto Renew
+name: Auto Renew Weirdhost
 
 on:
-  # 每天北京时间 11:00（UTC 03:00）
   schedule:
-    - cron: '0 3 * * *'
-  # 支持手动触发
-  workflow_dispatch:
+    # 北京时间 12:00 (中午) = UTC 04:00
+    - cron: '0 4 * * *'
+    # 建议：增加一次运行以防万一 (例如北京时间 00:00 = UTC 16:00)
+    # - cron: '0 4,16 * * *'
+  workflow_dispatch:       # 允许手动按钮触发
 
 jobs:
-  # 定时任务：跑脚本 + 推 README
-  renew-scheduled:
-    if: github.event_name == 'schedule'
+  renew:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 10
+    
+    # 授予写入仓库的权限，用于更新 README
     permissions:
-      contents: write   # 允许推 README
-    # 定时和手动用不同并发组，互不阻塞
-    concurrency:
-      group: weirdhost-renew-schedule
-      cancel-in-progress: true
+      contents: write
 
     steps:
-      - name: Checkout repository
+      - name: Checkout Code
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0   # rebase 需要完整历史
 
-      - name: Debug trigger/time
-        run: |
-          echo "event=$GITHUB_EVENT_NAME"
-          echo "ref=$GITHUB_REF"
-          echo "--- UTC ---"; date -u
-          echo "--- Asia/Shanghai ---"; TZ=Asia/Shanghai date
-
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'   # 不用 cache，避免 requirements.txt 报错
+          python-version: '3.11'
 
-      - name: Install dependencies and Playwright browsers
+      - name: Install Dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install playwright
-          python -m playwright install --with-deps chromium
+          sudo apt-get update
+          # 安装 xvfb 和中日韩字体(防止乱码)
+          sudo apt-get install -y xvfb fonts-noto-cjk
+          pip install playwright==1.52.0
+          playwright install chromium --with-deps
 
-      - name: Run Weirdhost renew script
-        run: python weirdhost.py
+      - name: Run Renew Script
         env:
+          # 从 GitHub Secrets 读取配置
           REMEMBER_WEB_COOKIE: ${{ secrets.REMEMBER_WEB_COOKIE }}
-          WEIRDHOST_SERVER_URLS: ${{ secrets.WEIRDHOST_SERVER_URLS }}
           PTERODACTYL_SESSION: ${{ secrets.PTERODACTYL_SESSION }}
           WEIRDHOST_EMAIL: ${{ secrets.WEIRDHOST_EMAIL }}
           WEIRDHOST_PASSWORD: ${{ secrets.WEIRDHOST_PASSWORD }}
-          HEADLESS: "true"
-          # 如需自定义面板域名，取消下一行注释
-          # WEIRDHOST_URL: "https://hub.weirdhost.xyz"
-
-      - name: Commit and push if README.md changed
-        if: success()   # 脚本成功才提交；若要无论成功失败都提交，改为 always()
+          WEIRDHOST_SERVER_URLS: ${{ secrets.WEIRDHOST_SERVER_URLS }}
+          
+          # 设置无头模式为 false (配合下面的 xvfb)
+          HEADLESS: 'false'
+          DISPLAY: ':99'
         run: |
-          set -e
+          # 启动虚拟显示器
+          Xvfb :99 -screen 0 1920x1080x24 &
+          sleep 2
+          # 运行 Python 脚本
+          python renew.py
+
+      - name: Commit & Push README
+        # 即使脚本失败也要提交 README (记录失败状态)
+        if: always()
+        run: |
           git config --local user.name "github-actions[bot]"
           git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          # 先提交本地变更，避免 pull 时出现“unstaged changes”报错
-          git add README.md
-          if git diff --staged --quiet; then
-            echo "没有检测到 README.md 的变动，无需提交。"
-            exit 0
+          
+          # 检查 README.md 是否有变动
+          if [[ -n $(git status -s README.md) ]]; then
+            git add README.md
+            git commit -m "📝 Update renewal status $(date +'%Y-%m-%d %H:%M')"
+            git push
+            echo "README.md updated and pushed."
+          else
+            echo "No changes to README.md."
           fi
 
-          git commit -m "docs: 自动更新 Weirdhost 续期状态 [skip ci]"
-
-          # 再拉取并 rebase，--autostash 以防仍有未暂存改动
-          git pull --rebase --autostash origin "${{ github.ref_name }}"
-
-          # 推回同一分支
-          git push origin HEAD:"${{ github.ref_name }}"
-          echo "README.md 已更新并成功推送到仓库。"
-
-  # 手动任务：只跑脚本，不推 README，避免与定时冲突
-  renew-manual:
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    permissions:
-      contents: read
-    concurrency:
-      group: weirdhost-renew-manual
-      cancel-in-progress: true
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Upload Debug Artifacts
+        # 只有失败时才上传截图，保留3天
+        if: failure()
+        uses: actions/upload-artifact@v4
         with:
-          fetch-depth: 0
-
-      - name: Debug trigger/time
-        run: |
-          echo "event=$GITHUB_EVENT_NAME"
-          echo "ref=$GITHUB_REF"
-          echo "--- UTC ---"; date -u
-          echo "--- Asia/Shanghai ---"; TZ=Asia/Shanghai date
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: Install dependencies and Playwright browsers
-        run: |
-          python -m pip install --upgrade pip
-          pip install playwright
-          python -m playwright install --with-deps chromium
-
-      - name: Run Weirdhost renew script
-        run: python weirdhost.py
-        env:
-          REMEMBER_WEB_COOKIE: ${{ secrets.REMEMBER_WEB_COOKIE }}
-          WEIRDHOST_SERVER_URLS: ${{ secrets.WEIRDHOST_SERVER_URLS }}
-          PTERODACTYL_SESSION: ${{ secrets.PTERODACTYL_SESSION }}
-          WEIRDHOST_EMAIL: ${{ secrets.WEIRDHOST_EMAIL }}
-          WEIRDHOST_PASSWORD: ${{ secrets.WEIRDHOST_PASSWORD }}
-          HEADLESS: "true"
-          # WEIRDHOST_URL: "https://hub.weirdhost.xyz"
+          name: debug-screenshots
+          path: screenshots/
+          retention-days: 3
