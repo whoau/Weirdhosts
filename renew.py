@@ -1,29 +1,31 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Weirdhost 自动续期脚本 - 完美修复版
-流程：点击续期 -> 等待10秒(过盾) -> 点击确认 -> 判定韩语结果
+Weirdhost 自动续期脚本 - 最终修复版 (2024)
+功能：
+1. 点击续期 -> 强制等待10秒(CF验���) -> 智能查找确认按钮 -> 点击确认
+2. 精准识别：成功、冷却中(时间未到)、错误
+3. 截图调试：每一步的关键节点都会截图，方便排查
 """
 
 import os
 import sys
 import time
-import re
 from datetime import datetime, timezone, timedelta
 from playwright.sync_api import sync_playwright
 
-# ==================== 配置常量 ====================
+# ==================== 配置区域 ====================
 BASE_URL = "https://hub.weirdhost.xyz"
 LOGIN_URL = f"{BASE_URL}/auth/login"
 
-# 环境变量读取
+# 环境变量
 COOKIE_REMEMBER = os.getenv('REMEMBER_WEB_COOKIE', '').strip()
 COOKIE_SESSION = os.getenv('PTERODACTYL_SESSION', '').strip()
 EMAIL = os.getenv('WEIRDHOST_EMAIL', '').strip()
 PASSWORD = os.getenv('WEIRDHOST_PASSWORD', '').strip()
 SERVER_URLS_STR = os.getenv('WEIRDHOST_SERVER_URLS', '').strip()
 
-# 设置为 True 为无头模式(服务器用)，False 为显示浏览器(本地调试用)
+# Headless: True=无界面(服务器用), False=显示浏览器(调试用)
 HEADLESS = os.getenv('HEADLESS', 'false').lower() == 'true'
 SCREENSHOT_DIR = "screenshots"
 
@@ -39,16 +41,19 @@ class RenewBot:
         print(f"[{bj_time}] {icon} [{level}] {msg}")
 
     def save_debug(self, name):
+        """保存截图用于调试"""
         try:
             os.makedirs(SCREENSHOT_DIR, exist_ok=True)
-            self.page.screenshot(path=f"{SCREENSHOT_DIR}/{name}.png", full_page=True)
+            path = f"{SCREENSHOT_DIR}/{name}.png"
+            self.page.screenshot(path=path, full_page=True)
+            # self.log(f"已保存截图: {path}", "DEBUG")
         except: pass
 
     def init_browser(self, p):
         self.log(f"启动浏览器 (Headless: {HEADLESS})...")
         self.browser = p.chromium.launch(
             headless=HEADLESS, 
-            # 添加参数隐藏自动化特征，防止被 CF 秒杀
+            # 关键：隐藏自动化特征，防止 CF 直接拦截
             args=[
                 "--no-sandbox", 
                 "--disable-blink-features=AutomationControlled",
@@ -63,19 +68,19 @@ class RenewBot:
         self.page = self.context.new_page()
         self.page.set_default_timeout(60000)
         
-        # 注入 JS 进一步隐藏 webdriver 属性
+        # 注入 JS 进一步抹除 WebDriver 痕迹
         self.page.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
             window.chrome = { runtime: {} };
         """)
 
     def check_cf(self):
-        """检测并尝试通过 Cloudflare 盾"""
+        """通用 Cloudflare 检查"""
         try:
             title = self.page.title()
             if "Just a moment" in title or "Cloudflare" in title:
-                self.log("检测到 Cloudflare 验证页，尝试通过...", "WARNING")
-                time.sleep(5)
+                self.log("检测到 Cloudflare 验证页...", "WARNING")
+                time.sleep(3)
                 
                 # 尝试点击 iframe 里的复选框
                 frames = self.page.frames
@@ -85,40 +90,36 @@ class RenewBot:
                             box = frame.locator("input[type='checkbox']").first
                             if box.is_visible():
                                 box.click()
-                                self.log("点击了 CF 验证框", "INFO")
+                                self.log("尝试点击 CF 验证框", "INFO")
                         except: pass
                 
-                # 等待页面跳转
+                # 等待跳转
                 try:
-                    self.page.wait_for_url(lambda u: "auth" in u or "server" in u, timeout=10000)
-                    self.log("Cloudflare 验证可能已通过", "SUCCESS")
+                    self.page.wait_for_url(lambda u: "auth" in u or "server" in u, timeout=8000)
+                    self.log("CF 验证通过", "SUCCESS")
                 except: pass
         except: pass
 
-    def is_logged_in(self):
-        if "/auth/login" in self.page.url: return False
-        try:
-            # 检查是否有登出按钮，如果有说明已登录
-            if self.page.locator("a[href*='/auth/logout']").count() > 0: return True
-        except: pass
-        return True
-
     def login(self):
-        # 1. 优先使用 Cookie 登录 (推荐)
+        """登录逻辑：优先 Cookie，其次账号密码"""
+        # 1. Cookie 登录
         if COOKIE_REMEMBER:
-            self.log("尝试 Cookie 登录 (跳过 CF)...", "INFO")
+            self.log("尝试 Cookie 登录...", "INFO")
             cookies = [{'name': 'remember_web_59ba36addc2b2f9401580f014c7f58ea4e30989d', 'value': COOKIE_REMEMBER, 'domain': 'hub.weirdhost.xyz', 'path': '/'}]
             if COOKIE_SESSION:
                 cookies.append({'name': 'pterodactyl_session', 'value': COOKIE_SESSION, 'domain': 'hub.weirdhost.xyz', 'path': '/'})
-            self.context.add_cookies(cookies)
+            
             try:
+                self.context.add_cookies(cookies)
                 self.page.goto(BASE_URL, wait_until="networkidle", timeout=30000)
-                if self.is_logged_in():
+                
+                if "/auth/login" not in self.page.url:
                     self.log("Cookie 登录成功", "SUCCESS")
                     return True
-            except: pass
+            except Exception as e:
+                self.log(f"Cookie 登录异常: {e}", "DEBUG")
 
-        # 2. 账号密码登录 (容易被 CF 拦截)
+        # 2. 账号密码登录
         if EMAIL and PASSWORD:
             self.log("尝试账号密码登录...", "INFO")
             try:
@@ -129,11 +130,13 @@ class RenewBot:
                 self.page.click("button[type='submit']")
                 self.page.wait_for_load_state("networkidle")
                 self.check_cf()
-                if self.is_logged_in():
+                
+                if "/auth/login" not in self.page.url:
                     self.log("账号密码登录成功", "SUCCESS")
                     return True
             except Exception as e:
                 self.log(f"登录失败: {e}", "ERROR")
+        
         return False
 
     def process_server(self, url):
@@ -142,24 +145,20 @@ class RenewBot:
         
         try:
             self.page.goto(url, wait_until="networkidle", timeout=60000)
-            
-            # 进页面后检查一次 CF
             self.check_cf()
             
             if "/auth/login" in self.page.url:
-                return {"id": server_id, "status": "❌ 掉线", "msg": "Login Lost"}
+                return {"id": server_id, "status": "❌ 掉线", "msg": "需重新登录"}
 
-            # -------------------------------------------------
+            # =================================================
             # 1. 寻找【时间追加】按钮
-            # -------------------------------------------------
+            # =================================================
             btn = None
-            # 按钮可能的文本 (韩文优先)
             target_texts = ["시간 추가", "시간추가", "Renew", "Extend"]
             for txt in target_texts:
                 loc = self.page.locator(f"button:has-text('{txt}')")
                 if loc.count() > 0:
                     for i in range(loc.count()):
-                        # 确保按钮是可见且可点击的
                         if loc.nth(i).is_visible() and loc.nth(i).is_enabled():
                             btn = loc.nth(i)
                             self.log(f"找到续期按钮: {txt}", "INFO")
@@ -167,50 +166,64 @@ class RenewBot:
                 if btn: break
             
             if not btn:
-                self.save_debug(f"no_btn_{server_id}")
+                self.save_debug(f"error_no_btn_{server_id}")
                 return {"id": server_id, "status": "❌ 无按钮", "msg": "Button Not Found"}
 
-            # -------------------------------------------------
-            # 2. 点击按钮 & 等待 10 秒 (关键步骤)
-            # -------------------------------------------------
-            self.log("点击【续期】...", "INFO")
+            # =================================================
+            # 2. 点击续期 & 强制等待 10 秒
+            # =================================================
+            self.log("点击续期按钮...", "INFO")
             btn.click()
 
-            self.log("等待 10 秒 (等待 CF 盾自动验证)...", "WARNING")
+            self.log("等待 10 秒 (等待 CF 盾 / 冷却)...", "WARNING")
             time.sleep(10)
 
-            # 10秒后，为了保险，检查弹窗里是否有没过的 CF 勾选框
+            # 截图调试：看看10秒后屏幕上是什么
+            self.save_debug(f"debug_after_wait_{server_id}")
+
+            # 检查是否有 CF 干扰（iframe里的勾选框）
             try:
                 frames = self.page.frames
                 for frame in frames:
                     if "challenges" in frame.url or "turnstile" in frame.url:
                         box = frame.locator("input[type='checkbox']").first
                         if box.is_visible():
-                            self.log("CF 盾未自动通过，手动点击...", "DEBUG")
+                            self.log("检测到 CF 验证框，尝试点击...", "DEBUG")
                             box.click()
                             time.sleep(2)
             except: pass
 
-            # -------------------------------------------------
-            # 3. 点击【确认】按钮 (SweetAlert2)
-            # -------------------------------------------------
-            confirm_btn = self.page.locator("button.swal2-confirm:visible")
-            
-            if confirm_btn.count() > 0:
-                self.log("点击【确认】...", "INFO")
-                # 尝试监听网络请求，确保点击生效
-                try:
+            # =================================================
+            # 3. 寻找并点击【确认】按钮 (宽容模式)
+            # =================================================
+            confirm_btn = None
+            try:
+                # 组合选择器：同时查找 Class 和 文字内容
+                # 这样即使没有 swal2-confirm 类，只要有 "확인" 字样也能找到
+                selector = "button.swal2-confirm, button:has-text('확인'), button:has-text('Confirm'), button:has-text('Yes')"
+                
+                # 等待按钮出现 (最多等 5 秒)
+                self.page.wait_for_selector(selector, state="visible", timeout=5000)
+                confirm_btn = self.page.locator(selector).first
+                
+                if confirm_btn.is_visible():
+                    txt = confirm_btn.inner_text().strip() if confirm_btn.inner_text() else "Icon"
+                    self.log(f"找到确认按钮 [{txt}]，点击...", "INFO")
+                    
+                    # 尝试监听点击后的网络请求
                     with self.page.expect_response(lambda r: r.request.method == "POST", timeout=5000):
-                        confirm_btn.first.click()
-                except:
-                    # 如果超时(没监听到包)，可能是前端拦截或已经在冷却，强制再点一次确保触发
-                    confirm_btn.first.click()
-            else:
-                self.log("未找到确认按钮 (可能已被自动处理)", "WARNING")
+                        confirm_btn.click()
+                else:
+                    raise Exception("按钮不可见")
 
-            # -------------------------------------------------
-            # 4. 分析结果 (读取韩语提示)
-            # -------------------------------------------------
+            except Exception as e:
+                self.log(f"寻找确认按钮失败: {e}", "WARNING")
+                self.save_debug(f"error_no_confirm_{server_id}")
+                # 注意：如果找不到按钮，可能是因为不需要确认直接成功了？继续往下检查文字
+
+            # =================================================
+            # 4. 分析结果
+            # =================================================
             time.sleep(3) # 等待提示出现
             self.save_debug(f"result_{server_id}")
 
@@ -223,23 +236,23 @@ class RenewBot:
 
             # --- 判定逻辑 ---
             
-            # A. 成功 (绿色图标 或 成功文字)
+            # A. 成功
             if self.page.locator(".swal2-success").is_visible() or any(s in full_text for s in ["Success", "completed", "완료", "성공"]):
                 self.log("✅ 续期成功！", "SUCCESS")
                 return {"id": server_id, "status": "✅ 成功", "msg": "Renewed"}
 
-            # B. 冷却中 (根据特定的韩语提示)
-            # "아직 서버를 갱신할 수 없습니다" = 尚无法更新服务器
+            # B. 冷却中 (时间未到)
+            # 你的特定韩语提示
             if "아직 서버를 갱신할 수 없습니다" in full_text:
                 self.log("检测到冷却提示：时间未到", "WARNING")
-                return {"id": server_id, "status": "⏳ 冷却中", "msg": "Cooldown (Wait)"}
+                return {"id": server_id, "status": "⏳ 冷却中", "msg": "Wait (Too Early)"}
 
-            # C. 其他失败 (已满/错误)
+            # C. 其他失败
             fail_keywords = ["already", "이미", "cool down", "limit", "error", "failed"]
             if any(f in full_text.lower() for f in fail_keywords):
                 return {"id": server_id, "status": "⏳ 其他限制", "msg": full_text[:15]}
 
-            # D. 无明确结果
+            # D. 未知
             if full_text:
                 return {"id": server_id, "status": "❓ 未知结果", "msg": full_text[:20]}
 
@@ -259,7 +272,7 @@ class RenewBot:
 
     def run(self):
         if not SERVER_URLS_STR:
-            self.log("未设置 SERVER_URLS 环境变量", "ERROR")
+            self.log("错误：未设置 SERVER_URLS 环境变量", "ERROR")
             sys.exit(1)
             
         urls = [u.strip() for u in SERVER_URLS_STR.split(',') if u.strip()]
@@ -267,13 +280,13 @@ class RenewBot:
         with sync_playwright() as p:
             self.init_browser(p)
             if not self.login():
-                self.log("无法登录，脚本退出", "ERROR")
+                self.log("无法登录，请检查 Cookie 或账号密码", "ERROR")
                 sys.exit(1)
             
             results = []
             for url in urls:
                 results.append(self.process_server(url))
-                time.sleep(3) # 两个服务器之间歇一下
+                time.sleep(3) 
             
             self.browser.close()
             self.update_readme(results)
