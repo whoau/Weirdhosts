@@ -21,18 +21,21 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          python-version: '3.11'
+          node-version: '20'
+          cache: 'npm'
 
       - name: Install Dependencies
         run: |
-          sudo apt-get update
           # 安装 xvfb 和中日韩字体(防止乱码)
+          sudo apt-get update
           sudo apt-get install -y xvfb fonts-noto-cjk
-          pip install playwright==1.52.0
-          playwright install chromium --with-deps
+          npm ci
+
+      - name: Install Playwright Browsers
+        run: npx playwright install --with-deps chromium
 
       - name: Run Renew Script
         env:
@@ -50,8 +53,8 @@ jobs:
           # 启动虚拟显示器
           Xvfb :99 -screen 0 1920x1080x24 &
           sleep 2
-          # 运行 Python 脚本
-          python renew.py
+          # 运行 Node.js 脚本
+          npm run renew
 
       - name: Commit & Push README
         # 即使脚本失败也要提交 README (记录失败状态)
