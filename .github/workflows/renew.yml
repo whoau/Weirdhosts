@@ -1,4 +1,4 @@
-name: WeirdHost Renew Final
+name: WeirdHost Renew (No TG)
 
 on:
   schedule:
@@ -18,7 +18,7 @@ jobs:
       with:
         node-version: '20'
 
-    # --- 关键：安装中日韩字体，否则脚本找不到韩文按钮 ---
+    # --- 必装：中日韩字体 (防止按钮乱码找不到) ---
     - name: Install Fonts & Deps
       run: |
         sudo apt-get update
@@ -28,15 +28,15 @@ jobs:
 
     - name: Run Script
       env:
+        # 只需配置 Cookie
         COOKIE_VALUE: ${{ secrets.COOKIE_VALUE }}
-        TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-        TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
       run: node index.js
 
+    # --- 必看：截图在这里下载 ---
     - name: Upload Screenshots
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: execution-screenshots
+        name: renew-screenshots
         path: screenshots/
         retention-days: 3
