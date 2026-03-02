@@ -11,6 +11,7 @@ import time
 import re
 from datetime import datetime, timezone, timedelta
 from playwright.sync_api import sync_playwright
+from playwright_stealth import stealth_sync
 
 # ==================== 配置 ====================
 BASE_URL = "https://hub.weirdhost.xyz"
@@ -30,6 +31,7 @@ SCREENSHOT_DIR = "screenshots"
 class RenewBot:
     def __init__(self):
         self.browser = None
+        self.context = None
         self.page = None
 
     def log(self, msg, level="INFO"):
@@ -40,20 +42,34 @@ class RenewBot:
     def save_debug(self, name):
         try:
             os.makedirs(SCREENSHOT_DIR, exist_ok=True)
-            self.page.screenshot(path=f"{SCREENSHOT_DIR}/{name}.png", full_page=True)
+            timestamp = int(time.time() * 1000)
+            self.page.screenshot(path=f"{SCREENSHOT_DIR}/{name}_{timestamp}.png", full_page=True)
+            self.log(f"截图已保存: {name}_{timestamp}.png", "DEBUG")
+        except: pass
+
+    def clear_screenshot_dir(self):
+        try:
+            if os.path.exists(SCREENSHOT_DIR):
+                for file in os.listdir(SCREENSHOT_DIR):
+                    file_path = os.path.join(SCREENSHOT_DIR, file)
+                    if os.path.isfile(file_path):
+                        os.unlink(file_path)
+            else:
+                os.makedirs(SCREENSHOT_DIR, exist_ok=True)
         except: pass
 
     def init_browser(self, p):
         self.log(f"启动浏览器 (Headless: {HEADLESS})...")
         self.browser = p.chromium.launch(
-            headless=HEADLESS, 
+            headless=HEADLESS,
             args=["--no-sandbox", "--disable-blink-features=AutomationControlled"]
         )
-        context = self.browser.new_context(
+        self.context = self.browser.new_context(
             viewport={"width": 1920, "height": 1080},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
         )
-        self.page = context.new_page()
+        self.page = self.context.new_page()
+        stealth_sync(self.page)
         self.page.set_default_timeout(60000)
 
     def check_cf(self):
@@ -77,9 +93,9 @@ class RenewBot:
             cookies = [{'name': 'remember_web_59ba36addc2b2f9401580f014c7f58ea4e30989d', 'value': COOKIE_REMEMBER, 'domain': 'hub.weirdhost.xyz', 'path': '/'}]
             if COOKIE_SESSION:
                 cookies.append({'name': 'pterodactyl_session', 'value': COOKIE_SESSION, 'domain': 'hub.weirdhost.xyz', 'path': '/'})
-            
+
             try:
-                self.page.context.add_cookies(cookies)
+                self.context.add_cookies(cookies)
                 self.page.goto(BASE_URL, wait_until="networkidle", timeout=30000)
                 if "/auth/login" not in self.page.url:
                     self.log("Cookie 登录成功", "SUCCESS")
@@ -123,18 +139,21 @@ class RenewBot:
     def process_server(self, url):
         server_id = url.strip('/').split("/")[-1]
         self.log(f"--- 处理: {server_id} ---", "INFO")
-        
+
         try:
             self.page.goto(url, wait_until="networkidle", timeout=60000)
             self.check_cf()
-            
+
             if "/auth/login" in self.page.url:
+                self.save_debug(f"{server_id}_final_offline")
                 return {"id": server_id, "status": "❌ 掉线", "msg": "需登录"}
 
             # =================================================
             # 步骤 1: 获取【续期前】的时间
             # =================================================
             old_time = self.get_expiry_time()
+            self.save_debug(f"{server_id}_before_renewal")
+
             if old_time:
                 self.log(f"当前到期时间: {old_time}", "INFO")
             else:
@@ -151,7 +170,7 @@ class RenewBot:
                     break
             
             if not btn:
-                self.save_debug(f"no_btn_{server_id}")
+                self.save_debug(f"{server_id}_final_no_button")
                 return {"id": server_id, "status": "❌ 无按钮", "msg": "Button Not Found"}
 
             self.log("点击【续期】...", "INFO")
@@ -165,6 +184,9 @@ class RenewBot:
             # =================================================
             self.log("等待 10 秒 (等待系统处理)...", "WARNING")
             time.sleep(10)
+
+            # 截图 2: 点击续期后，刷新前
+            self.save_debug(f"{server_id}_after_click")
 
             # 尝试点击可能存在的确认按钮 (作为保险，点了总比不点好)
             # 即使你不需要，有些时候 CF 盾是在弹窗里的
@@ -185,12 +207,16 @@ class RenewBot:
                 self.check_cf()
             except: pass
 
+            # 截图 3: 刷新后，最终状态
+            self.save_debug(f"{server_id}_final_state")
+
             new_time = self.get_expiry_time()
-            
+
             if new_time:
                 self.log(f"最新到期时间: {new_time}", "INFO")
             else:
                 # 如果刷新后拿不到时间，可能是网页挂了
+                self.save_debug(f"{server_id}_final_unknown")
                 return {"id": server_id, "status": "❓ 未知", "msg": "Time read fail"}
 
             # =================================================
@@ -199,18 +225,23 @@ class RenewBot:
             if old_time and new_time:
                 if new_time > old_time:
                     self.log("✅ 时间已增加！续期成功", "SUCCESS")
+                    self.save_debug(f"{server_id}_final_success")
                     return {"id": server_id, "status": "✅ 成功", "msg": f"-> {new_time}"}
                 elif new_time == old_time:
                     self.log("⏳ 时间未变化 (可能是冷却中)", "WARNING")
+                    self.save_debug(f"{server_id}_final_cooldown")
                     return {"id": server_id, "status": "⏳ 冷却中", "msg": "Time No Change"}
                 else:
+                    self.save_debug(f"{server_id}_final_anomaly")
                     return {"id": server_id, "status": "⚠️ 异常", "msg": "Time Decreased?"}
-            
+
             # 如果没有旧时间做对比，只能返回成功(盲)
+            self.save_debug(f"{server_id}_final_blind")
             return {"id": server_id, "status": "❓ 完成", "msg": f"Current: {new_time}"}
 
         except Exception as e:
             self.log(f"出错: {e}", "ERROR")
+            self.save_debug(f"{server_id}_final_error")
             return {"id": server_id, "status": "💥 出错", "msg": str(e)[:20]}
 
     def update_readme(self, results):
@@ -224,16 +255,18 @@ class RenewBot:
     def run(self):
         if not SERVER_URLS_STR: sys.exit(1)
         urls = [u.strip() for u in SERVER_URLS_STR.split(',') if u.strip()]
-        
+
+        self.clear_screenshot_dir()
+
         with sync_playwright() as p:
             self.init_browser(p)
             if not self.login(): sys.exit(1)
-            
+
             results = []
             for url in urls:
                 results.append(self.process_server(url))
                 time.sleep(3)
-            
+
             self.browser.close()
             self.update_readme(results)
 
