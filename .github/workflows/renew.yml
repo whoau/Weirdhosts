@@ -7,7 +7,48 @@ on:
   workflow_dispatch: # 允许手动点击按钮运行
 
 jobs:
-  renew-job:
+  renew-job:name: WeirdHost Auto Renew
+
+on:
+  schedule:
+    # 北京时间早上 8:00
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Setup Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Install Dependencies
+      run: |
+        npm install
+        npx playwright install chromium
+
+    - name: Run Script
+      env:
+        # 在 Secrets 里填 Value 值
+        COOKIE_VALUE: ${{ secrets.COOKIE_VALUE }}
+        TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+        TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+      run: node index.js
+
+    # --- 关键步骤：上传截图供下载 ---
+    - name: Upload Screenshots
+      if: always() # 无论成功失败都上传
+      uses: actions/upload-artifact@v4
+      with:
+        name: execution-screenshots
+        path: screenshots/
+        retention-days: 3
     runs-on: ubuntu-latest
 
     steps:
