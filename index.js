@@ -5,7 +5,6 @@ const path = require('path');
 const { exec } = require('child_process');
 const axios = require('axios');
 
-// 环境变量
 const COOKIE_VALUE = process.env.COOKIE_VALUE;
 const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
 const TG_CHAT_ID = process.env.TG_CHAT_ID;
@@ -16,7 +15,7 @@ chromium.use(stealth);
 async function sendTg(text, imgPath) {
     if (!TG_BOT_TOKEN || !TG_CHAT_ID) return;
     try {
-        console.log(`[TG] ${text}`);
+        console.log(`[TG] 发送: ${text}`);
         await axios.post(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`, {
             chat_id: TG_CHAT_ID, text: text, parse_mode: 'Markdown'
         });
@@ -27,7 +26,7 @@ async function sendTg(text, imgPath) {
     } catch (e) { console.error('TG Error:', e.message); }
 }
 
-// 注入脚本：用于 CF 盾坐标定位
+// 注入脚本：定位 Turnstile 坐标
 const INJECTED_SCRIPT = `
 (function() {
     if (window.self === window.top) return;
@@ -55,24 +54,49 @@ const INJECTED_SCRIPT = `
 })();
 `;
 
-(async () => {
-    if (!COOKIE_VALUE) {
-        console.error('❌ 请配置 COOKIE_VALUE');
-        process.exit(1);
+// 点击 CF 盾的函数
+async function clickTurnstile(page, context) {
+    console.log('🛡️ 扫描 CF 盾...');
+    for (let i = 0; i < 5; i++) {
+        const frames = page.frames();
+        for (const frame of frames) {
+            const data = await frame.evaluate(() => window.__turnstile_data).catch(()=>null);
+            if (data) {
+                const el = await frame.frameElement();
+                const box = await el.boundingBox();
+                if (box) {
+                    const x = box.x + data.x;
+                    const y = box.y + data.y;
+                    console.log(`🖱️ 点击 CF 盾坐标: ${x.toFixed(0)}, ${y.toFixed(0)}`);
+                    const s = await context.newCDPSession(page);
+                    await s.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+                    await new Promise(r => setTimeout(r, 150));
+                    await s.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+                    await s.detach();
+                    return true;
+                }
+            }
+        }
+        await page.waitForTimeout(800);
     }
+    return false;
+}
+
+(async () => {
+    if (!COOKIE_VALUE) process.exit(1);
 
     const shotDir = path.join(process.cwd(), 'screenshots');
     if (!fs.existsSync(shotDir)) fs.mkdirSync(shotDir, { recursive: true });
 
     console.log('🚀 启动浏览器...');
     const browser = await chromium.launch({ headless: true });
-    // 设置较大分辨率确保内容可见
+    // 设置高分辨率视口
     const context = await browser.newContext({
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        viewport: { width: 1400, height: 1200 }
+        viewport: { width: 1600, height: 1600 },
+        deviceScaleFactor: 1
     });
 
-    // 注入 Cookie
     await context.addCookies([{
         name: 'pterodactyl_session',
         value: COOKIE_VALUE,
@@ -95,138 +119,95 @@ const INJECTED_SCRIPT = `
         console.log('🔗 访问 Dashboard...');
         await page.goto('https://hub.weirdhost.xyz/', { waitUntil: 'domcontentloaded' });
         
-        // --- 1. Cloudflare 过盾处理 ---
+        // 0. 首页全屏盾处理 (Just a moment) - 防止进不去
         if ((await page.title()).includes('Just a moment')) {
-            console.log('🛡️ 正在尝试绕过 CF 盾...');
-            for (let i = 0; i < 15; i++) {
-                // 遍历所有 Frame 寻找 Turnstile
-                for (const frame of page.frames()) {
-                    const data = await frame.evaluate(() => window.__turnstile_data).catch(()=>null);
-                    if (data) {
-                        const box = await (await frame.frameElement()).boundingBox();
-                        if (box) {
-                            const x = box.x + data.x;
-                            const y = box.y + data.y;
-                            const s = await context.newCDPSession(page);
-                            await s.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
-                            await new Promise(r => setTimeout(r, 100));
-                            await s.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
-                            await s.detach();
-                            break;
-                        }
-                    }
-                }
-                await page.waitForTimeout(2000);
-                if (!(await page.title()).includes('Just a moment')) break;
-            }
+            console.log('🛡️ 处理首页全屏盾...');
+            await clickTurnstile(page, context);
+            await page.waitForTimeout(3000);
         }
 
-        // 验证 CF 是否通过
-        const cfShot = path.join(shotDir, '1_cf_pass.png');
-        await page.screenshot({ path: cfShot });
-        if ((await page.title()).includes('Just a moment')) {
-            await sendTg('❌ CF 验证失败', cfShot);
-            throw new Error('CF Failed');
+        // 进入服务器详情
+        const serverLink = page.locator('a[href*="/server/"]').first();
+        if (await serverLink.count() > 0) {
+            console.log('🖱️ 进入服务器详情页...');
+            await serverLink.click();
+            await page.waitForLoadState('networkidle');
         }
 
-        // --- 2. 检查登录状态 ---
-        await page.waitForTimeout(3000);
-        if (page.url().includes('login')) {
-            const logShot = path.join(shotDir, 'login_fail.png');
-            await page.screenshot({ path: logShot });
-            await sendTg('⚠️ Cookie 已失效 (Login Failed)', logShot);
-            throw new Error('Cookie Expired');
-        }
-
-        console.log('✅ 登录成功，等待页面加载...');
-        await page.waitForLoadState('networkidle');
-
-        // 缩小页面，防止截图不全
-        await page.evaluate(() => document.body.style.zoom = '0.7');
+        // 缩放页面
+        await page.evaluate(() => document.body.style.zoom = '0.75');
         await page.waitForTimeout(1000);
 
-        // --- 3. 寻找并点击 "시간 추가" (增加时间) ---
-        // 你的截图显示按钮文字是 "시간 추가"
-        console.log('🔍 正在寻找韩文续期按钮: 시간 추가 ...');
+        // 寻找续期按钮 (韩文/英文)
+        console.log('⚡ 寻找续期按钮...');
+        const renewBtns = page.locator('button').filter({ hasText: /시간 추가|Renew|Extend/i });
         
-        // 截图当前界面（含剩余时间）
-        const dashShot = path.join(shotDir, '2_dashboard_kr.png');
-        await page.screenshot({ path: dashShot });
-        await sendTg('📅 当前面板状态 (查看剩余时间)', dashShot);
-
-        // 定位包含 "시간 추가" 的元素
-        const renewBtns = page.getByText('시간 추가');
-        const count = await renewBtns.count();
-
-        if (count > 0) {
-            console.log(`⚡ 发现 ${count} 个续期按钮`);
-            
-            // 遍历点击（防止有多个服务器）
-            for (let i = 0; i < count; i++) {
-                const btn = renewBtns.nth(i);
-                if (await btn.isVisible()) {
-                    console.log(`🖱️ 点击第 ${i+1} 个按钮...`);
-                    await btn.click();
-                    
-                    // 等待弹窗或反应
-                    await page.waitForTimeout(2000);
-
-                    // --- 4. 处理确认弹窗 (如果有) ---
-                    // 韩文确认通常是 "확인" (Confirm) 或 "연장" (Extend) 或 "Yes"
-                    // 我们尝试点击模态框里的确认按钮
-                    const modalBtn = page.locator('.modal.show button, .modal-open button')
-                        .filter({ hasText: /확인|연장|Confirm|Yes/i }).first();
-                    
-                    if (await modalBtn.isVisible()) {
-                        console.log('✅ 点击确认/확인');
-                        await modalBtn.click();
-                        await page.waitForTimeout(3000);
-                    }
-                }
-            }
-
-            // --- 5. 截图结果 ---
-            const resultShot = path.join(shotDir, '3_renew_result.png');
-            await page.screenshot({ path: resultShot });
-            await sendTg('✅ 韩文续期操作完成', resultShot);
-
-        } else {
-            // 如果没找到按钮，可能是因为需要先点进服务器详情
-            console.log('⚠️ 首页未找到按钮，尝试点击进入服务器详情...');
-            
-            // 尝试点击第一个类似服务器卡片的元素或链接
-            const serverLink = page.locator('a[href*="/server/"]').first();
-            if (await serverLink.count() > 0) {
-                await serverLink.click();
-                await page.waitForTimeout(3000);
+        if (await renewBtns.count() > 0) {
+            // 点击续期按钮，触发弹窗
+            const btn = renewBtns.last();
+            if (await btn.isVisible()) {
+                console.log('🖱️ 点击续期按钮，等待弹窗...');
+                await btn.click();
                 
-                // 在详情页再次寻找 "시간 추가"
-                const innerBtn = page.getByText('시간 추가').first();
-                if (await innerBtn.isVisible()) {
-                    await innerBtn.click();
+                // 等待模态框弹出 (里面包含 CF 盾)
+                await page.waitForTimeout(3000);
+
+                // ==========================================
+                // 📸 截图 1: CF 盾出现 (弹窗已打开)
+                // ==========================================
+                console.log('📸 截图 1: CF 盾状态');
+                const shot1 = path.join(shotDir, '1_cf_shield.png');
+                await page.screenshot({ path: shot1 });
+                await sendTg('1️⃣ CF 盾出现 (Verification Shield)', shot1);
+
+                // 处理 CF 盾
+                console.log('🛡️ 正在过盾...');
+                await clickTurnstile(page, context);
+                await page.waitForTimeout(2000);
+
+                // 点击弹窗里的“确认”按钮 (如果有)
+                const confirmBtn = page.locator('.modal.show button').filter({ hasText: /Confirm|확인|Yes|Renew/i }).last();
+                if (await confirmBtn.isVisible()) {
+                    console.log('🖱️ 点击确认按钮...');
+                    await confirmBtn.click();
                     await page.waitForTimeout(2000);
-                    // 再次尝试确认
-                    const modalBtn = page.locator('.modal.show button').filter({ hasText: /확인|연장/i }).first();
-                    if (await modalBtn.isVisible()) await modalBtn.click();
-                    
-                    const innerResultShot = path.join(shotDir, '3_inner_renew.png');
-                    await page.screenshot({ path: innerResultShot });
-                    await sendTg('✅ (详情页) 续期完成', innerResultShot);
-                } else {
-                    console.log('详情页也没找到按钮');
-                    await sendTg('ℹ️ 未找到可续期按钮 (无需续期?)');
                 }
-            } else {
-                console.log('未找到服务器链接');
-                await sendTg('ℹ️ 未找到服务器或按钮');
+
+                // ==========================================
+                // 📸 截图 2: 续期结果 (Success/Fail 弹窗)
+                // ==========================================
+                console.log('📸 截图 2: 续期结果');
+                // 等待一下 SweetAlert 或 Toast 消息
+                await page.waitForTimeout(1000);
+                const shot2 = path.join(shotDir, '2_renew_result.png');
+                await page.screenshot({ path: shot2 });
+                await sendTg('2️⃣ 续期结果 (Result)', shot2);
             }
+        } else {
+            console.log('⚠️ 未找到续期按钮');
         }
+
+        // ==========================================
+        // 📸 截图 3: 剩余时间 (刷新页面后)
+        // ==========================================
+        console.log('🔄 刷新页面获取最新时间...');
+        await page.reload({ waitUntil: 'domcontentloaded' });
+        await page.waitForLoadState('networkidle');
+        
+        // 再次缩放以截取全屏信息
+        await page.evaluate(() => document.body.style.zoom = '0.75');
+        await page.waitForTimeout(1500);
+
+        console.log('📸 截图 3: 剩余时间');
+        const shot3 = path.join(shotDir, '3_time_remaining.png');
+        await page.screenshot({ path: shot3 });
+        await sendTg('3️⃣ 最终剩余时间 (Time Remaining)', shot3);
 
     } catch (e) {
         console.error(e);
         const errShot = path.join(shotDir, 'error.png');
         await page.screenshot({ path: errShot }).catch(()=>{});
-        await sendTg(`❌ 脚本出错: ${e.message}`, errShot);
+        await sendTg(`❌ 出错: ${e.message}`, errShot);
         process.exit(1);
     } finally {
         await browser.close();
