@@ -1,14 +1,10 @@
 {
-  "name": "weirdhost-renewal",
+  "name": "weirdhost-renew",
   "version": "1.0.0",
-  "description": "Weirdhost auto-renewal bot using Playwright with stealth",
-  "main": "renew.js",
-  "scripts": {
-    "renew": "node renew.js"
-  },
   "dependencies": {
-    "playwright": "^1.52.0",
+    "axios": "^1.6.0",
+    "playwright": "^1.40.0",
     "playwright-extra": "^4.3.6",
-    "@extra/stealth": "^2.11.2"
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
   }
 }
