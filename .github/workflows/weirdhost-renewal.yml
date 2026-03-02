@@ -73,11 +73,21 @@ jobs:
             echo "No changes to README.md."
           fi
 
-      - name: Upload Debug Artifacts
-        # 只有失败时才上传截图，保留3天
-        if: failure()
+      - name: Package Screenshots
+        if: always()
+        run: |
+          if [ -d screenshots ] && [ "$(ls -A screenshots)" ]; then
+            zip -r screenshots.zip screenshots
+          fi
+
+      - name: Upload Screenshot Artifacts
+        # 始终尝试上传截图，若不存在则忽略，保留3天
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: debug-screenshots
-          path: screenshots/
+          name: runtime-screenshots
+          path: |
+            screenshots/
+            screenshots.zip
           retention-days: 3
+          if-no-files-found: ignore
