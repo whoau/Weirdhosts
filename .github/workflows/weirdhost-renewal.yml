@@ -81,7 +81,7 @@ jobs:
           fi
 
       - name: Upload Screenshot Artifacts
-        # 始终尝试上传截图，若不存在则忽略，保留3天
+        # 始终尝试上传截图，若不存在则警告，保留3天
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -90,4 +90,4 @@ jobs:
             screenshots/
             screenshots.zip
           retention-days: 3
-          if-no-files-found: ignore
+          if-no-files-found: warn
