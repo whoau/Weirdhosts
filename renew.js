@@ -128,7 +128,7 @@ class RenewBot {
       }
 
       try {
-        await this.page.context.addCookies(cookies);
+        await this.page.context().addCookies(cookies);
         await this.page.goto(BASE_URL, { waitUntil: 'networkidle', timeout: 30000 });
         if (!this.page.url().includes('/auth/login')) {
           log("Cookie 登录成功", "SUCCESS");
