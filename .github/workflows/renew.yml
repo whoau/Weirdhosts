@@ -1,10 +1,9 @@
-name: WeirdHost Auto Renew
+name: WeirdHost Renew Final
 
 on:
   schedule:
-    # 北京时间早上 8:00
-    - cron: '0 0 * * *'
-  workflow_dispatch:
+    - cron: '0 4 * * *' # 每天运行
+  workflow_dispatch:    # 允许手动运行
 
 jobs:
   renew:
@@ -19,22 +18,23 @@ jobs:
       with:
         node-version: '20'
 
-    - name: Install Dependencies
+    # --- 关键：安装中日韩字体，否则脚本找不到韩文按钮 ---
+    - name: Install Fonts & Deps
       run: |
+        sudo apt-get update
+        sudo apt-get install -y fonts-noto-cjk
         npm install
         npx playwright install chromium
 
     - name: Run Script
       env:
-        # 在 Secrets 里填 Value 值
         COOKIE_VALUE: ${{ secrets.COOKIE_VALUE }}
         TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
         TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
       run: node index.js
 
-    # --- 关键步骤：上传截图供下载 ---
     - name: Upload Screenshots
-      if: always() # 无论成功失败都上传
+      if: always()
       uses: actions/upload-artifact@v4
       with:
         name: execution-screenshots
