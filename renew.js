@@ -47,12 +47,29 @@ function log(msg, level = "INFO") {
   console.log(`[${getBjTime()}] ${icon} [${level}] ${msg}`);
 }
 
-async function saveDebug(page, name) {
+async function captureScreenshot(page, step, serverId) {
   try {
     if (!fs.existsSync(SCREENSHOT_DIR)) {
       fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
     }
-    await page.screenshot({ path: `${SCREENSHOT_DIR}/${name}.png`, fullPage: true });
+    const timestamp = Date.now();
+    const filename = `${serverId}_${step}_${timestamp}.png`;
+    await page.screenshot({ path: path.join(SCREENSHOT_DIR, filename), fullPage: true });
+    log(`截图已保存: ${filename}`, "DEBUG");
+  } catch (e) {
+    // ignore
+  }
+}
+
+function clearScreenshotDir() {
+  try {
+    if (fs.existsSync(SCREENSHOT_DIR)) {
+      for (const file of fs.readdirSync(SCREENSHOT_DIR)) {
+        fs.unlinkSync(path.join(SCREENSHOT_DIR, file));
+      }
+    } else {
+      fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
+    }
   } catch (e) {
     // ignore
   }
@@ -100,10 +117,15 @@ class RenewBot {
             // ignore
           }
         }
+        // 等待 CF 盾消失
+        await new Promise(r => setTimeout(r, 3000));
+        const newTitle = await this.page.title();
+        return !newTitle.includes("Just a moment");
       }
     } catch (e) {
       // ignore
     }
+    return false;
   }
 
   async login() {
@@ -144,7 +166,10 @@ class RenewBot {
       log("尝试账号密码登录...", "INFO");
       try {
         await this.page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded' });
-        await this.checkCf();
+        const cfResolved = await this.checkCf();
+        if (cfResolved) {
+          await captureScreenshot(this.page, "cf-success", "login");
+        }
         await this.page.fill("input[name='username'], input[name='email']", EMAIL);
         await this.page.fill("input[name='password']", PASSWORD);
         await this.page.click("button[type='submit']");
@@ -185,14 +210,20 @@ class RenewBot {
 
     try {
       await this.page.goto(url, { waitUntil: 'networkidle', timeout: 60000 });
-      await this.checkCf();
+      const cfResolved = await this.checkCf();
+      if (cfResolved) {
+        await captureScreenshot(this.page, "cf-success", serverId);
+      }
 
       if (this.page.url().includes('/auth/login')) {
+        await captureScreenshot(this.page, "final-offline", serverId);
         return { id: serverId, status: "❌ 掉线", msg: "需登录" };
       }
 
       // 步骤 1: 获取【续期前】的时间
       const oldTime = await this.getExpiryTime();
+      await captureScreenshot(this.page, "expiry-read", serverId);
+
       if (oldTime) {
         log(`当前到期时间: ${oldTime.toISOString().replace('T', ' ').substring(0, 19)}`, "INFO");
       } else {
@@ -212,7 +243,7 @@ class RenewBot {
       }
 
       if (!btn) {
-        await saveDebug(this.page, `no_btn_${serverId}`);
+        await captureScreenshot(this.page, "final-no-button", serverId);
         return { id: serverId, status: "❌ 无按钮", msg: "Button Not Found" };
       }
 
@@ -254,6 +285,7 @@ class RenewBot {
         log(`最新到期时间: ${newTime.toISOString().replace('T', ' ').substring(0, 19)}`, "INFO");
       } else {
         // 如果刷新后拿不到时间，可能是网页挂了
+        await captureScreenshot(this.page, "final-unknown", serverId);
         return { id: serverId, status: "❓ 未知", msg: "Time read fail" };
       }
 
@@ -262,21 +294,26 @@ class RenewBot {
         if (newTime > oldTime) {
           log("✅ 时间已增加！续期成功", "SUCCESS");
           const newTimeStr = newTime.toISOString().replace('T', ' ').substring(0, 19);
+          await captureScreenshot(this.page, "final-success", serverId);
           return { id: serverId, status: "✅ 成功", msg: `-> ${newTimeStr}` };
         } else if (newTime.getTime() === oldTime.getTime()) {
           log("⏳ 时间未变化 (可能是冷却中)", "WARNING");
+          await captureScreenshot(this.page, "final-cooldown", serverId);
           return { id: serverId, status: "⏳ 冷却中", msg: "Time No Change" };
         } else {
+          await captureScreenshot(this.page, "final-anomaly", serverId);
           return { id: serverId, status: "⚠️ 异常", msg: "Time Decreased?" };
         }
       }
 
       // 如果没有旧时间做对比，只能返回成功(盲)
       const currentTimeStr = newTime.toISOString().replace('T', ' ').substring(0, 19);
+      await captureScreenshot(this.page, "final-blind", serverId);
       return { id: serverId, status: "❓ 完成", msg: `Current: ${currentTimeStr}` };
 
     } catch (e) {
       log(`出错: ${e}`, "ERROR");
+      await captureScreenshot(this.page, "final-error", serverId);
       return { id: serverId, status: "💥 出错", msg: String(e).substring(0, 20) };
     }
   }
@@ -301,6 +338,8 @@ class RenewBot {
     }
     const urls = SERVER_URLS_STR.split(',').map(u => u.trim()).filter(u => u);
 
+    clearScreenshotDir();
+
     await this.initBrowser();
     const loginSuccess = await this.login();
     if (!loginSuccess) {
@@ -321,7 +360,7 @@ class RenewBot {
 }
 
 // ==================== 入口 ====================
-RenewBot.prototype.run().catch(e => {
+new RenewBot().run().catch(e => {
   log(`Fatal error: ${e}`, "ERROR");
   process.exit(1);
 });
