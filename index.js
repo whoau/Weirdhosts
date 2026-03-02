@@ -1,33 +1,36 @@
 const { chromium } = require('playwright-extra');
 const stealth = require('puppeteer-extra-plugin-stealth')();
-const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const { exec } = require('child_process');
+const axios = require('axios');
 
 // --- 环境变量 ---
-const COOKIE_VALUE = process.env.COOKIE_VALUE;
+// 直接填 Cookie 的值，不要 Key
+const COOKIE_VALUE = process.env.COOKIE_VALUE; 
 const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
 const TG_CHAT_ID = process.env.TG_CHAT_ID;
 
-// 启用 Stealth 插件 (隐藏自动化特征)
 chromium.use(stealth);
 
-// --- 辅助函数：TG 发送 ---
-async function sendTelegramMessage(text, imagePath = null) {
+// --- 辅助：发送 TG 消息和图片 ---
+async function sendTg(text, imgPath) {
     if (!TG_BOT_TOKEN || !TG_CHAT_ID) return;
     try {
+        console.log(`[TG] 发送消息: ${text}`);
+        // 发文字
         await axios.post(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`, {
             chat_id: TG_CHAT_ID, text: text, parse_mode: 'Markdown'
         });
-        if (imagePath && fs.existsSync(imagePath)) {
-            const cmd = `curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendPhoto" -F chat_id="${TG_CHAT_ID}" -F photo="@${imagePath}"`;
+        // 发图片 (使用 curl 上传，最稳定)
+        if (imgPath && fs.existsSync(imgPath)) {
+            const cmd = `curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendPhoto" -F chat_id="${TG_CHAT_ID}" -F photo="@${imgPath}"`;
             await new Promise(resolve => exec(cmd, resolve));
         }
-    } catch (e) { console.error('TG 发送失败:', e.message); }
+    } catch (e) { console.error('[TG] 发送失败:', e.message); }
 }
 
-// --- 注入脚本：用于检测 CF 盾位置 ---
+// --- 注入脚本：用于定位 Turnstile 坐标 ---
 const INJECTED_SCRIPT = `
 (function() {
     if (window.self === window.top) return;
@@ -40,7 +43,11 @@ const INJECTED_SCRIPT = `
                     const cb = shadowRoot.querySelector('input[type="checkbox"]');
                     if (cb && cb.getBoundingClientRect().width > 0) {
                         const r = cb.getBoundingClientRect();
-                        window.__turnstile_data = { x: r.left + r.width/2, y: r.top + r.height/2 };
+                        // 计算相对于视口的坐标
+                        window.__turnstile_data = { 
+                            x: r.left + r.width/2, 
+                            y: r.top + r.height/2 
+                        };
                         return true;
                     }
                 };
@@ -56,130 +63,157 @@ const INJECTED_SCRIPT = `
 `;
 
 (async () => {
+    // 1. 检查 Cookie
     if (!COOKIE_VALUE) {
-        console.error('❌ 未设置 COOKIE_VALUE');
+        console.error('❌ 请在 Secrets 中设置 COOKIE_VALUE');
         process.exit(1);
     }
 
+    // 2. 准备截图目录
+    const shotDir = path.join(process.cwd(), 'screenshots');
+    if (!fs.existsSync(shotDir)) fs.mkdirSync(shotDir, { recursive: true });
+
+    // 3. 启动浏览器
     console.log('🚀 启动浏览器...');
-    const browser = await chromium.launch({ headless: true }); // GitHub Actions 推荐 headless
+    const browser = await chromium.launch({ headless: true });
     const context = await browser.newContext({
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         viewport: { width: 1280, height: 800 }
     });
 
-    // 注入 Cookie
-    await context.addCookies([{
-        name: 'pterodactyl_session', // 面板标准 Cookie 名
-        value: COOKIE_VALUE,
-        domain: 'hub.weirdhost.xyz',
-        path: '/',
-        secure: true
-    }]);
+    // 4. 注入 Cookie
+    // WeirdHost 的 Session Cookie 通常叫 'pterodactyl_session' 或 'laravel_session'
+    // 这里我们两个都试一下，确保兼容
+    await context.addCookies([
+        {
+            name: 'pterodactyl_session', 
+            value: COOKIE_VALUE,
+            domain: 'hub.weirdhost.xyz',
+            path: '/',
+            secure: true
+        },
+        {
+            name: 'laravel_session', //以此防备不同的面板配置
+            value: COOKIE_VALUE,
+            domain: 'hub.weirdhost.xyz',
+            path: '/',
+            secure: true
+        }
+    ]);
 
     const page = await context.newPage();
     page.setDefaultTimeout(60000);
     await page.addInitScript(INJECTED_SCRIPT);
 
-    const photoDir = 'screenshots';
-    if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir);
-
     try {
-        console.log('🔗 正在访问 hub.weirdhost.xyz ...');
+        console.log('🔗 访问网站...');
         await page.goto('https://hub.weirdhost.xyz/', { waitUntil: 'domcontentloaded' });
         await page.waitForTimeout(3000);
 
-        // --- 1. 处理 Cloudflare ---
+        // --- 阶段一：处理 Cloudflare ---
         if ((await page.title()).includes('Just a moment')) {
-            console.log('🛡️ 检测到 Cloudflare 盾，尝试绕过...');
-            let cfPassed = false;
+            console.log('🛡️ 遇到 CF 盾，尝试突破...');
             
-            for (let i = 0; i < 10; i++) {
-                // 查找注入的坐标数据
-                const frames = page.frames();
-                for (const frame of frames) {
+            for (let i = 0; i < 15; i++) {
+                // 寻找注入的坐标
+                let clicked = false;
+                for (const frame of page.frames()) {
                     const data = await frame.evaluate(() => window.__turnstile_data).catch(()=>null);
                     if (data) {
-                        // 使用 CDP 模拟真实点击
-                        const session = await context.newCDPSession(page);
-                        // 必须加上 frame 的偏移量 (这里简化处理，通常全屏模式下相对坐标即绝对坐标)
-                        // 若 headless 模式下 frame.evaluate 返回的是视口坐标，直接点击即可
-                        console.log(`🖱️ 点击 Turnstile: ${data.x}, ${data.y}`);
-                        await session.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: data.x, y: data.y, button: 'left', clickCount: 1 });
-                        await new Promise(r => setTimeout(r, 100));
-                        await session.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: data.x, y: data.y, button: 'left', clickCount: 1 });
-                        await session.detach();
-                        break;
+                        const iframeEl = await frame.frameElement();
+                        const box = await iframeEl.boundingBox();
+                        if (box) {
+                            // 转换坐标：iframe位置 + 内部相对位置
+                            const x = box.x + data.x;
+                            const y = box.y + data.y;
+                            
+                            const session = await context.newCDPSession(page);
+                            await session.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+                            await new Promise(r => setTimeout(r, 100)); // 模拟按压时间
+                            await session.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+                            await session.detach();
+                            console.log(`🖱️ 已点击 Turnstile (${x}, ${y})`);
+                            clicked = true;
+                            break;
+                        }
                     }
                 }
-                
+
                 await page.waitForTimeout(2000);
+                // 检查是否通过
                 if (!(await page.title()).includes('Just a moment')) {
-                    cfPassed = true;
+                    console.log('✅ CF 盾已通过');
                     break;
                 }
             }
-            
-            const cfShot = `${photoDir}/1_cf_pass.png`;
-            await page.screenshot({ path: cfShot });
-            if (!cfPassed) throw new Error("无法绕过 CF 盾");
-            await sendTelegramMessage("🛡️ Cloudflare 验证通过", cfShot);
         }
 
-        // --- 2. 检查登录状态 ---
+        // --- 截图1：CF 通过后的状态 ---
+        const cfShot = path.join(shotDir, '1_cf_passed.png');
+        await page.screenshot({ path: cfShot });
+        // 如果还在 CF 页面，说明失败
+        if ((await page.title()).includes('Just a moment')) {
+            await sendTg('❌ 无法绕过 Cloudflare 盾', cfShot);
+            throw new Error('CF Bypass Failed');
+        } else {
+            await sendTg('🛡️ Cloudflare 验证通过', cfShot);
+        }
+
+        // --- 阶段二：检查登录 ---
         await page.waitForTimeout(2000);
         if (page.url().includes('login')) {
-            const loginShot = `${photoDir}/login_fail.png`;
+            const loginShot = path.join(shotDir, 'error_login.png');
             await page.screenshot({ path: loginShot });
-            await sendTelegramMessage("⚠️ **Cookie 已失效**\n请更新 Secrets 中的 COOKIE_VALUE", loginShot);
-            throw new Error("Cookie 失效");
+            await sendTg('⚠️ Cookie 已失效，请更新 Secrets', loginShot);
+            throw new Error('Cookie Expired');
         }
 
-        // --- 3. 仪表盘截图 ---
-        console.log('✅ 进入仪表盘');
-        // 滚动到底部以展示所有服务器
+        // --- 阶段三：仪表盘截图 (包含时间) ---
+        console.log('📊 进入仪表盘，截取剩余时间...');
+        // 滚动到底部确保服务器卡片加载
         await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
         await page.waitForTimeout(1000);
-        const dashShot = `${photoDir}/2_dashboard.png`;
+        
+        const dashShot = path.join(shotDir, '2_dashboard_time.png');
         await page.screenshot({ path: dashShot, fullPage: true });
-        // 发送包含剩余时间的截图
-        await sendTelegramMessage("📊 **当前状态** (请查看截图中的剩余时间)", dashShot);
+        await sendTg('📅 当前服务器状态 (见图)', dashShot);
 
-        // --- 4. 执行续期 ---
+        // --- 阶段四：执行续期 ---
         const renewBtns = page.getByRole('button', { name: 'Renew', exact: false });
         const count = await renewBtns.count();
 
         if (count === 0) {
-            console.log('ℹ️ 未找到 Renew 按钮');
-            await sendTelegramMessage("ℹ️ 未找到可续期的服务器 (可能尚未到期)");
+            console.log('ℹ️ 没有发现需要续期的按钮');
+            await sendTg('ℹ️ 无需续期');
         } else {
-            console.log(`发现 ${count} 个服务器需要续期`);
+            console.log(`⚡ 发现 ${count} 个续期按钮`);
             for (let i = 0; i < count; i++) {
                 const btn = renewBtns.nth(i);
                 if (await btn.isVisible()) {
                     await btn.click();
-                    await page.waitForTimeout(2000); // 等待模态框
+                    await page.waitForTimeout(2000); // 等待弹窗
 
-                    // 处理模态框内的确认
-                    // 某些模态框内可能有 Turnstile，也可能有 Confirm 按钮
-                    // 这里尝试盲点确认
-                    const confirmBtn = page.locator('.modal.show, .modal-open').getByRole('button', { name: 'Renew', exact: false });
-                    if (await confirmBtn.isVisible()) {
-                        await confirmBtn.click();
-                        console.log('已点击确认续期');
-                        await page.waitForTimeout(3000);
+                    // 处理弹窗确认
+                    const modalBtn = page.locator('.modal.show, .modal-open').getByRole('button', { name: 'Renew', exact: false });
+                    if (await modalBtn.isVisible()) {
+                        await modalBtn.click();
+                        console.log('✅ 点击确认续期');
+                        await page.waitForTimeout(3000); // 等待请求完成
                     }
                 }
             }
             
-            const resultShot = `${photoDir}/3_renew_result.png`;
+            // --- 截图3：续期结果 ---
+            const resultShot = path.join(shotDir, '3_renew_result.png');
             await page.screenshot({ path: resultShot, fullPage: true });
-            await sendTelegramMessage("✅ **续期操作执行完毕**", resultShot);
+            await sendTg('✅ 续期操作完成', resultShot);
         }
 
     } catch (e) {
-        console.error('Error:', e);
-        await sendTelegramMessage(`❌ **脚本错误**: ${e.message}`);
+        console.error('运行错误:', e);
+        const errShot = path.join(shotDir, '99_error.png');
+        await page.screenshot({ path: errShot }).catch(()=>{});
+        await sendTg(`❌ 脚本出错: ${e.message}`, errShot);
         process.exit(1);
     } finally {
         await browser.close();
