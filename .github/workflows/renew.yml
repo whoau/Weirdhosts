@@ -2,15 +2,6 @@ name: WeirdHost Auto Renew
 
 on:
   schedule:
-    # 北京时间早上 8:00 (UTC 0:00)
-    - cron: '0 4 * * *'
-  workflow_dispatch: # 允许手动点击按钮运行
-
-jobs:
-  renew-job:name: WeirdHost Auto Renew
-
-on:
-  schedule:
     # 北京时间早上 8:00
     - cron: '0 0 * * *'
   workflow_dispatch:
@@ -49,39 +40,3 @@ jobs:
         name: execution-screenshots
         path: screenshots/
         retention-days: 3
-    runs-on: ubuntu-latest
-
-    steps:
-      # 1. 拉取代码
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      # 2. 准备 Node.js 环境
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      # 3. 安装依赖 (自动安装 playwright 和 浏览器)
-      - name: Install Dependencies
-        run: |
-          npm install axios playwright playwright-extra puppeteer-extra-plugin-stealth
-          npx playwright install chromium
-
-      # 4. 运行你的脚本
-      - name: Run Renew Script
-        env:
-          COOKIE_VALUE: ${{ secrets.COOKIE_VALUE }}
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-        run: node index.js
-
-      # 5. [新增] 上传截图作为构件 (Artifact)
-      # 这一步即使脚本运行出错也会执行，方便你查看报错截图
-      - name: Upload Screenshots
-        if: always() 
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-screenshots  # 下载时的压缩包名字
-          path: screenshots/       # 脚本中保存截图的文件夹名称
-          retention-days: 5        # 文件保留 5 天
