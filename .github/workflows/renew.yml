@@ -1,0 +1,32 @@
+name: Renew WeirdHost
+
+on:
+  schedule:
+    # 每天北京时间早上 8 点运行 (UTC 0:00)
+    - cron: '0 4 * * *'
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Install Dependencies
+      run: |
+        npm install
+        npx playwright install chromium
+
+    - name: Run Renew Script
+      env:
+        COOKIE_VALUE: ${{ secrets.COOKIE_VALUE }}
+        TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+        TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+      run: node index.js
