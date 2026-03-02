@@ -5,32 +5,29 @@ const path = require('path');
 const { exec } = require('child_process');
 const axios = require('axios');
 
-// --- 环境变量 ---
-// 直接填 Cookie 的值，不要 Key
-const COOKIE_VALUE = process.env.COOKIE_VALUE; 
+// 环境变量
+const COOKIE_VALUE = process.env.COOKIE_VALUE;
 const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
 const TG_CHAT_ID = process.env.TG_CHAT_ID;
 
 chromium.use(stealth);
 
-// --- 辅助：发送 TG 消息和图片 ---
+// TG 发送工具
 async function sendTg(text, imgPath) {
     if (!TG_BOT_TOKEN || !TG_CHAT_ID) return;
     try {
-        console.log(`[TG] 发送消息: ${text}`);
-        // 发文字
+        console.log(`[TG] ${text}`);
         await axios.post(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`, {
             chat_id: TG_CHAT_ID, text: text, parse_mode: 'Markdown'
         });
-        // 发图片 (使用 curl 上传，最稳定)
         if (imgPath && fs.existsSync(imgPath)) {
             const cmd = `curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendPhoto" -F chat_id="${TG_CHAT_ID}" -F photo="@${imgPath}"`;
             await new Promise(resolve => exec(cmd, resolve));
         }
-    } catch (e) { console.error('[TG] 发送失败:', e.message); }
+    } catch (e) { console.error('TG Error:', e.message); }
 }
 
-// --- 注入脚本：用于定位 Turnstile 坐标 ---
+// 注入脚本：用于 CF 盾坐标定位
 const INJECTED_SCRIPT = `
 (function() {
     if (window.self === window.top) return;
@@ -43,11 +40,7 @@ const INJECTED_SCRIPT = `
                     const cb = shadowRoot.querySelector('input[type="checkbox"]');
                     if (cb && cb.getBoundingClientRect().width > 0) {
                         const r = cb.getBoundingClientRect();
-                        // 计算相对于视口的坐标
-                        window.__turnstile_data = { 
-                            x: r.left + r.width/2, 
-                            y: r.top + r.height/2 
-                        };
+                        window.__turnstile_data = { x: r.left + r.width/2, y: r.top + r.height/2 };
                         return true;
                     }
                 };
@@ -63,155 +56,175 @@ const INJECTED_SCRIPT = `
 `;
 
 (async () => {
-    // 1. 检查 Cookie
     if (!COOKIE_VALUE) {
-        console.error('❌ 请在 Secrets 中设置 COOKIE_VALUE');
+        console.error('❌ 请配置 COOKIE_VALUE');
         process.exit(1);
     }
 
-    // 2. 准备截图目录
     const shotDir = path.join(process.cwd(), 'screenshots');
     if (!fs.existsSync(shotDir)) fs.mkdirSync(shotDir, { recursive: true });
 
-    // 3. 启动浏览器
     console.log('🚀 启动浏览器...');
     const browser = await chromium.launch({ headless: true });
+    // 设置较大分辨率确保内容可见
     const context = await browser.newContext({
-        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        viewport: { width: 1280, height: 800 }
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        viewport: { width: 1400, height: 1200 }
     });
 
-    // 4. 注入 Cookie
-    // WeirdHost 的 Session Cookie 通常叫 'pterodactyl_session' 或 'laravel_session'
-    // 这里我们两个都试一下，确保兼容
-    await context.addCookies([
-        {
-            name: 'pterodactyl_session', 
-            value: COOKIE_VALUE,
-            domain: 'hub.weirdhost.xyz',
-            path: '/',
-            secure: true
-        },
-        {
-            name: 'laravel_session', //以此防备不同的面板配置
-            value: COOKIE_VALUE,
-            domain: 'hub.weirdhost.xyz',
-            path: '/',
-            secure: true
-        }
-    ]);
+    // 注入 Cookie
+    await context.addCookies([{
+        name: 'pterodactyl_session',
+        value: COOKIE_VALUE,
+        domain: 'hub.weirdhost.xyz',
+        path: '/',
+        secure: true
+    }, {
+        name: 'laravel_session',
+        value: COOKIE_VALUE,
+        domain: 'hub.weirdhost.xyz',
+        path: '/',
+        secure: true
+    }]);
 
     const page = await context.newPage();
     page.setDefaultTimeout(60000);
     await page.addInitScript(INJECTED_SCRIPT);
 
     try {
-        console.log('🔗 访问网站...');
+        console.log('🔗 访问 Dashboard...');
         await page.goto('https://hub.weirdhost.xyz/', { waitUntil: 'domcontentloaded' });
-        await page.waitForTimeout(3000);
-
-        // --- 阶段一：处理 Cloudflare ---
+        
+        // --- 1. Cloudflare 过盾处理 ---
         if ((await page.title()).includes('Just a moment')) {
-            console.log('🛡️ 遇到 CF 盾，尝试突破...');
-            
+            console.log('🛡️ 正在尝试绕过 CF 盾...');
             for (let i = 0; i < 15; i++) {
-                // 寻找注入的坐标
-                let clicked = false;
+                // 遍历所有 Frame 寻找 Turnstile
                 for (const frame of page.frames()) {
                     const data = await frame.evaluate(() => window.__turnstile_data).catch(()=>null);
                     if (data) {
-                        const iframeEl = await frame.frameElement();
-                        const box = await iframeEl.boundingBox();
+                        const box = await (await frame.frameElement()).boundingBox();
                         if (box) {
-                            // 转换坐标：iframe位置 + 内部相对位置
                             const x = box.x + data.x;
                             const y = box.y + data.y;
-                            
-                            const session = await context.newCDPSession(page);
-                            await session.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
-                            await new Promise(r => setTimeout(r, 100)); // 模拟按压时间
-                            await session.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
-                            await session.detach();
-                            console.log(`🖱️ 已点击 Turnstile (${x}, ${y})`);
-                            clicked = true;
+                            const s = await context.newCDPSession(page);
+                            await s.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+                            await new Promise(r => setTimeout(r, 100));
+                            await s.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+                            await s.detach();
                             break;
                         }
                     }
                 }
-
                 await page.waitForTimeout(2000);
-                // 检查是否通过
-                if (!(await page.title()).includes('Just a moment')) {
-                    console.log('✅ CF 盾已通过');
-                    break;
-                }
+                if (!(await page.title()).includes('Just a moment')) break;
             }
         }
 
-        // --- 截图1：CF 通过后的状态 ---
-        const cfShot = path.join(shotDir, '1_cf_passed.png');
+        // 验证 CF 是否通过
+        const cfShot = path.join(shotDir, '1_cf_pass.png');
         await page.screenshot({ path: cfShot });
-        // 如果还在 CF 页面，说明失败
         if ((await page.title()).includes('Just a moment')) {
-            await sendTg('❌ 无法绕过 Cloudflare 盾', cfShot);
-            throw new Error('CF Bypass Failed');
-        } else {
-            await sendTg('🛡️ Cloudflare 验证通过', cfShot);
+            await sendTg('❌ CF 验证失败', cfShot);
+            throw new Error('CF Failed');
         }
 
-        // --- 阶段二：检查登录 ---
-        await page.waitForTimeout(2000);
+        // --- 2. 检查登录状态 ---
+        await page.waitForTimeout(3000);
         if (page.url().includes('login')) {
-            const loginShot = path.join(shotDir, 'error_login.png');
-            await page.screenshot({ path: loginShot });
-            await sendTg('⚠️ Cookie 已失效，请更新 Secrets', loginShot);
+            const logShot = path.join(shotDir, 'login_fail.png');
+            await page.screenshot({ path: logShot });
+            await sendTg('⚠️ Cookie 已失效 (Login Failed)', logShot);
             throw new Error('Cookie Expired');
         }
 
-        // --- 阶段三：仪表盘截图 (包含时间) ---
-        console.log('📊 进入仪表盘，截取剩余时间...');
-        // 滚动到底部确保服务器卡片加载
-        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-        await page.waitForTimeout(1000);
-        
-        const dashShot = path.join(shotDir, '2_dashboard_time.png');
-        await page.screenshot({ path: dashShot, fullPage: true });
-        await sendTg('📅 当前服务器状态 (见图)', dashShot);
+        console.log('✅ 登录成功，等待页面加载...');
+        await page.waitForLoadState('networkidle');
 
-        // --- 阶段四：执行续期 ---
-        const renewBtns = page.getByRole('button', { name: 'Renew', exact: false });
+        // 缩小页面，防止截图不全
+        await page.evaluate(() => document.body.style.zoom = '0.7');
+        await page.waitForTimeout(1000);
+
+        // --- 3. 寻找并点击 "시간 추가" (增加时间) ---
+        // 你的截图显示按钮文字是 "시간 추가"
+        console.log('🔍 正在寻找韩文续期按钮: 시간 추가 ...');
+        
+        // 截图当前界面（含剩余时间）
+        const dashShot = path.join(shotDir, '2_dashboard_kr.png');
+        await page.screenshot({ path: dashShot });
+        await sendTg('📅 当前面板状态 (查看剩余时间)', dashShot);
+
+        // 定位包含 "시간 추가" 的元素
+        const renewBtns = page.getByText('시간 추가');
         const count = await renewBtns.count();
 
-        if (count === 0) {
-            console.log('ℹ️ 没有发现需要续期的按钮');
-            await sendTg('ℹ️ 无需续期');
-        } else {
+        if (count > 0) {
             console.log(`⚡ 发现 ${count} 个续期按钮`);
+            
+            // 遍历点击（防止有多个服务器）
             for (let i = 0; i < count; i++) {
                 const btn = renewBtns.nth(i);
                 if (await btn.isVisible()) {
+                    console.log(`🖱️ 点击第 ${i+1} 个按钮...`);
                     await btn.click();
-                    await page.waitForTimeout(2000); // 等待弹窗
+                    
+                    // 等待弹窗或反应
+                    await page.waitForTimeout(2000);
 
-                    // 处理弹窗确认
-                    const modalBtn = page.locator('.modal.show, .modal-open').getByRole('button', { name: 'Renew', exact: false });
+                    // --- 4. 处理确认弹窗 (如果有) ---
+                    // 韩文确认通常是 "확인" (Confirm) 或 "연장" (Extend) 或 "Yes"
+                    // 我们尝试点击模态框里的确认按钮
+                    const modalBtn = page.locator('.modal.show button, .modal-open button')
+                        .filter({ hasText: /확인|연장|Confirm|Yes/i }).first();
+                    
                     if (await modalBtn.isVisible()) {
+                        console.log('✅ 点击确认/확인');
                         await modalBtn.click();
-                        console.log('✅ 点击确认续期');
-                        await page.waitForTimeout(3000); // 等待请求完成
+                        await page.waitForTimeout(3000);
                     }
                 }
             }
-            
-            // --- 截图3：续期结果 ---
+
+            // --- 5. 截图结果 ---
             const resultShot = path.join(shotDir, '3_renew_result.png');
-            await page.screenshot({ path: resultShot, fullPage: true });
-            await sendTg('✅ 续期操作完成', resultShot);
+            await page.screenshot({ path: resultShot });
+            await sendTg('✅ 韩文续期操作完成', resultShot);
+
+        } else {
+            // 如果没找到按钮，可能是因为需要先点进服务器详情
+            console.log('⚠️ 首页未找到按钮，尝试点击进入服务器详情...');
+            
+            // 尝试点击第一个类似服务器卡片的元素或链接
+            const serverLink = page.locator('a[href*="/server/"]').first();
+            if (await serverLink.count() > 0) {
+                await serverLink.click();
+                await page.waitForTimeout(3000);
+                
+                // 在详情页再次寻找 "시간 추가"
+                const innerBtn = page.getByText('시간 추가').first();
+                if (await innerBtn.isVisible()) {
+                    await innerBtn.click();
+                    await page.waitForTimeout(2000);
+                    // 再次尝试确认
+                    const modalBtn = page.locator('.modal.show button').filter({ hasText: /확인|연장/i }).first();
+                    if (await modalBtn.isVisible()) await modalBtn.click();
+                    
+                    const innerResultShot = path.join(shotDir, '3_inner_renew.png');
+                    await page.screenshot({ path: innerResultShot });
+                    await sendTg('✅ (详情页) 续期完成', innerResultShot);
+                } else {
+                    console.log('详情页也没找到按钮');
+                    await sendTg('ℹ️ 未找到可续期按钮 (无需续期?)');
+                }
+            } else {
+                console.log('未找到服务器链接');
+                await sendTg('ℹ️ 未找到服务器或按钮');
+            }
         }
 
     } catch (e) {
-        console.error('运行错误:', e);
-        const errShot = path.join(shotDir, '99_error.png');
+        console.error(e);
+        const errShot = path.join(shotDir, 'error.png');
         await page.screenshot({ path: errShot }).catch(()=>{});
         await sendTg(`❌ 脚本出错: ${e.message}`, errShot);
         process.exit(1);
