@@ -1,37 +1,63 @@
 name: WeirdHost Auto Renew
+
 on:
   schedule:
-    - cron: '0 0 * * *' # 每天北京时间 8 点运行
-  workflow_dispatch:
+    # 每天 UTC 时间 02:00 (北京时间 10:00) 执行一次
+    # 您可以根据服务器续期规则调整 cron 表达式
+    - cron: '0 2 * * *'
+  workflow_dispatch: # 允许手动点击按钮触发测试
 
 jobs:
-  run-renew:
+  renew:
     runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
+    timeout-minutes: 15 # 设置超时防止卡死消耗额度
 
-      - name: Setup Node
-        uses: actions/setup-node@v3
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          node-version: 18
+          node-version: '20'
 
       - name: Install Dependencies
         run: |
-          npm install playwright-extra puppeteer-extra-plugin-stealth axios
-          # 安装 Google Chrome
-          wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
-          echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
-          sudo apt-get update
-          sudo apt-get install -y google-chrome-stable
-          # 补全 Playwright 运行依赖
-          npx playwright install-deps chromium
+          # 初始化 package.json (如果不存在)
+          if [ ! -f package.json ]; then
+            npm init -y
+          fi
+          # 安装脚本所需的依赖
+          npm install playwright playwright-extra puppeteer-extra-plugin-stealth axios
 
-      - name: Run Renew Script
+      - name: Install System Dependencies & Browsers
+        run: |
+          # 安装 Playwright 浏览器依赖
+          npx playwright install chromium
+          npx playwright install-deps chromium
+          # 安装 xvfb (用于模拟显示器，绕过无头检测)
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+
+      - name: Run Auto Renew Script
         env:
-          USERS_JSON: ${{ secrets.USERS_JSON }}
+          # 从 GitHub Secrets 读取环境变量
+          COOKIES_JSON: ${{ secrets.COOKIES_JSON }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          # 如果使用了代理，请在 Secrets 中添加 HTTP_PROXY
+          # HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
+          # 指定 GitHub Runner 系统自带 Chrome 的路径
+          CHROME_PATH: /usr/bin/google-chrome
         run: |
-          sudo apt-get install -y xvfb
+          # 使用 xvfb-run 模拟 1280x720 的显示器运行脚本
+          # 这对于绕过 Turnstile 和 Cloudflare 至关重要
           xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" node renew.js
+
+      - name: Upload Screenshots
+        if: always() # 无论成功还是失败，都上传截图文件夹
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots
+          path: screenshots/
+          retention-days: 3
