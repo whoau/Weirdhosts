@@ -1,42 +1,54 @@
-name: WeirdHost Renew (No TG)
+name: WeirdHost Auto Renew
 
 on:
   schedule:
-    - cron: '0 4 * * *' # 每天运行
-  workflow_dispatch:    # 允许手动运行
+    # 每天 UTC 08:00 运行 (北京时间 16:00)
+    - cron: '0 8 * * *'
+  workflow_dispatch: # 允许手动触发
 
 jobs:
   renew:
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 30
+
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Setup Node
-      uses: actions/setup-node@v4
-      with:
-        node-version: '20'
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
-    # --- 必装：中日韩字体 (防止按钮乱码找不到) ---
-    - name: Install Fonts & Deps
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y fonts-noto-cjk
-        npm install
-        npx playwright install chromium
+      - name: Install dependencies
+        run: npm install
 
-    - name: Run Script
-      env:
-        # 只需配置 Cookie
-        COOKIE_VALUE: ${{ secrets.COOKIE_VALUE }}
-      run: node index.js
+      - name: Install Playwright Chromium
+        run: npx playwright install chromium --with-deps
 
-    # --- 必看：截图在这里下载 ---
-    - name: Upload Screenshots
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: renew-screenshots
-        path: screenshots/
-        retention-days: 3
+      - name: Install Google Chrome (Stable)
+        run: |
+          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
+
+      - name: Install xvfb
+        run: sudo apt-get install -y xvfb
+
+      - name: Run Renew Script
+        env:
+          USERS_JSON: ${{ secrets.USERS_JSON }}
+          HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" node renew.js
+
+      - name: Upload Screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-${{ github.run_number }}
+          path: screenshots/
+          retention-days: 7
+          if-no-files-found: ignore
