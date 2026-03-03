@@ -18,7 +18,7 @@ const CHROME_PATH = process.env.CHROME_PATH || '/usr/bin/google-chrome';
 const DEBUG_PORT = 9222;
 process.env.NO_PROXY = 'localhost,127.0.0.1';
 
-// --- 代理配置省略 (保持原样即可) ---
+// --- 代理配置 ---
 const HTTP_PROXY = process.env.HTTP_PROXY;
 let PROXY_CONFIG = null;
 if (HTTP_PROXY) {
@@ -150,15 +150,14 @@ async function attemptTurnstileCdp(page) {
 
         let targetUrls = [];
 
-        // 核心更新：如果 JSON 里配置了 server_id，直接拼装 URL，绝对保密！
         if (account.server_id) {
             console.log(`>> 读取到专属 Server ID，开启安全直达模式...`);
             targetUrls.push(`${TARGET_URL}server/${account.server_id}`);
         } else {
             console.log(`>> 未配置 Server ID，将尝试在主页抓取...`);
-            await page.goto(TARGET_URL);
-            await page.waitForLoadState('networkidle');
-            await page.waitForTimeout(3000);
+            // 【修复点 1】：改用 domcontentloaded 并去掉 networkidle
+            await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded' });
+            await page.waitForTimeout(5000);
             if (page.url().includes('login')) { console.error(`>> ❌ Cookie失效`); continue; }
             const serverHrefs = await page.locator('a[href*="/server/"]').evaluateAll(elements => elements.map(el => el.href));
             targetUrls = [...new Set(serverHrefs)];
@@ -173,15 +172,15 @@ async function attemptTurnstileCdp(page) {
         for (let sIdx = 0; sIdx < targetUrls.length; sIdx++) {
             const serverUrl = targetUrls[sIdx];
             const serverIdSnippet = serverUrl.split('/').pop(); 
-            console.log(`\n>> 强行跳转至服务器: ${serverUrl.replace(serverIdSnippet, '********')}`); // 控制台日志也打码保护
+            console.log(`\n>> 强行跳转至服务器: ${serverUrl.replace(serverIdSnippet, '********')}`); 
             
-            await page.goto(serverUrl);
-            await page.waitForLoadState('networkidle');
-            await page.waitForTimeout(3000);
+            // 【修复点 2】：改用 domcontentloaded 并去掉 networkidle，防止 WebSocket 导致超时
+            await page.goto(serverUrl, { waitUntil: 'domcontentloaded' });
+            await page.waitForTimeout(5000);
 
             if (page.url().includes('login')) {
                 console.error(`>> ❌ Cookie失效，已退回登录页`);
-                break; // 跳出当前服务器的循环
+                break; 
             }
 
             for (let attempt = 1; attempt <= 3; attempt++) {
