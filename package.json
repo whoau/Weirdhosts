@@ -1,7 +1,7 @@
 {
   "name": "weirdhost-auto-renew",
-  "version": "1.0.0",
-  "description": "Auto renew WeirdHost servers",
+  "version": "2.0.0",
+  "description": "WeirdHost 自动续期（Cookie登录 + 시간 추가）",
   "scripts": {
     "start": "node renew.js",
     "local": "node renew_local.js"
