@@ -1,8 +1,8 @@
-name: WeirdHost Auto Renew
+name: WeirdHost 自动续期
 
 on:
   schedule:
-    # 每天 UTC 08:00 运行 (北京时间 16:00)
+    # 每天 UTC 08:00 运行（北京时间 16:00）
     - cron: '0 8 * * *'
   workflow_dispatch: # 允许手动触发
 
@@ -12,31 +12,31 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - name: Checkout repository
+      - name: 拉取代码
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: 安装 Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      - name: Install dependencies
+      - name: 安装依赖
         run: npm install
 
-      - name: Install Playwright Chromium
+      - name: 安装 Playwright Chromium
         run: npx playwright install chromium --with-deps
 
-      - name: Install Google Chrome (Stable)
+      - name: 安装 Google Chrome
         run: |
           wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
           echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
           sudo apt-get update
           sudo apt-get install -y google-chrome-stable
 
-      - name: Install xvfb
+      - name: 安装 xvfb（虚拟显示器）
         run: sudo apt-get install -y xvfb
 
-      - name: Run Renew Script
+      - name: 运行续期脚本
         env:
           USERS_JSON: ${{ secrets.USERS_JSON }}
           HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
@@ -44,7 +44,7 @@ jobs:
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" node renew.js
 
-      - name: Upload Screenshots
+      - name: 上传截图
         if: always()
         uses: actions/upload-artifact@v4
         with:
