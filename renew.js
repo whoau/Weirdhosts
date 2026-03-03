@@ -391,4 +391,73 @@ async function attemptTurnstileCdp(page) {
                                     const text = await notTimeLoc.innerText();
                                     console.log(`   >> ⏳ 暂无法续期，服务器提示: ${text.substring(0, 50)}...`);
 
-                                    const skipShotPath = path
+                                    const skipShotPath = path.join(photoDir, `${accountId}_skip.png`);
+                                    try { await page.screenshot({ path: skipShotPath, fullPage: true }); } catch (e) { }
+
+                                    await sendTelegramMessage(`⏳ *暂无法续期 (跳过)*\n账号: ${accountId}\n原因: 还没到时间/限制触发`, skipShotPath);
+
+                                    renewSuccess = true; 
+                                    try {
+                                        const closeBtn = modal.getByLabel('Close').or(modal.getByRole('button', {name: /close|닫기/i}));
+                                        if (await closeBtn.isVisible()) await closeBtn.click();
+                                    } catch (e) { }
+                                    break;
+                                }
+                                await page.waitForTimeout(200);
+                            }
+                        } catch (e) { }
+
+                        if (renewSuccess) break;
+
+                        if (hasCaptchaError) {
+                            console.log('   >> 验证码错误。刷新页面重置 Turnstile...');
+                            await page.reload();
+                            await page.waitForTimeout(3000);
+                            continue;
+                        }
+
+                        // 验证是否成功关闭模态框
+                        await page.waitForTimeout(2000);
+                        if (!await modal.isVisible()) {
+                            console.log('   >> ✅ 模态框已关闭。续期成功！');
+                            const successShotPath = path.join(photoDir, `${accountId}_success.png`);
+                            try { await page.screenshot({ path: successShotPath, fullPage: true }); } catch (e) { }
+                            await sendTelegramMessage(`✅ *续期成功*\n账号: ${accountId}\n状态: 服务器时间已成功增加 [${RENEW_BTN_TEXT}]！`, successShotPath);
+                            renewSuccess = true;
+                            break;
+                        } else {
+                            console.log('   >> 模态框仍打开但无明确错误。重试循环...');
+                            await page.reload();
+                            await page.waitForTimeout(3000);
+                            continue;
+                        }
+                    } else {
+                        console.log('   >> 未找到模态框内的确认按钮？刷新中...');
+                        await page.reload();
+                        await page.waitForTimeout(3000);
+                        continue;
+                    }
+                } else {
+                    console.log(`未找到 [${RENEW_BTN_TEXT}] 按钮 (服务器可能已续期，或不在该页面)。`);
+                    break;
+                }
+            }
+
+        } catch (err) {
+            console.error(`处理账号 ${accountId} 时发生异常:`, err);
+        }
+
+        // 保存当前账号最终状态快照
+        const finalScreenshotPath = path.join(photoDir, `${accountId}_final.png`);
+        try {
+            await page.screenshot({ path: finalScreenshotPath, fullPage: true });
+            console.log(`账号结束快照已保存: ${finalScreenshotPath}`);
+        } catch (e) { }
+
+        console.log(`账号 ${accountId} 处理完成\n`);
+    }
+
+    console.log('所有账号处理完成，正在退出。');
+    await browser.close();
+    process.exit(0);
+})();
