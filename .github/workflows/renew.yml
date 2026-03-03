@@ -1,54 +1,37 @@
-name: WeirdHost 自动续期
-
+name: WeirdHost Auto Renew
 on:
   schedule:
-    # 每天 UTC 08:00 运行（北京时间 16:00）
-    - cron: '0 8 * * *'
-  workflow_dispatch: # 允许手动触发
+    - cron: '0 0 * * *' # 每天北京时间 8 点运行
+  workflow_dispatch:
 
 jobs:
-  renew:
+  run-renew:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-
     steps:
-      - name: 拉取代码
-        uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v3
 
-      - name: 安装 Node.js
-        uses: actions/setup-node@v4
+      - name: Setup Node
+        uses: actions/setup-node@v3
         with:
-          node-version: '20'
+          node-version: 18
 
-      - name: 安装依赖
-        run: npm install
-
-      - name: 安装 Playwright Chromium
-        run: npx playwright install chromium --with-deps
-
-      - name: 安装 Google Chrome
+      - name: Install Dependencies
         run: |
-          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
-          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+          npm install playwright-extra puppeteer-extra-plugin-stealth axios
+          # 安装 Google Chrome
+          wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+          echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
           sudo apt-get update
           sudo apt-get install -y google-chrome-stable
+          # 补全 Playwright 运行依赖
+          npx playwright install-deps chromium
 
-      - name: 安装 xvfb（虚拟显示器）
-        run: sudo apt-get install -y xvfb
-
-      - name: 运行续期脚本
+      - name: Run Renew Script
         env:
           USERS_JSON: ${{ secrets.USERS_JSON }}
-          HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-        run: xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" node renew.js
-
-      - name: 上传截图
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: screenshots-${{ github.run_number }}
-          path: screenshots/
-          retention-days: 7
-          if-no-files-found: ignore
+        run: |
+          sudo apt-get install -y xvfb
+          xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" node renew.js
