@@ -1,221 +1,190 @@
 const { chromium } = require('playwright-extra');
 const stealth = require('puppeteer-extra-plugin-stealth')();
-const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
-const { spawn, execSync } = require('child_process');
+const { spawn } = require('child_process');
+const http = require('http');
 
+// 启用 stealth 插件
 chromium.use(stealth);
 
-// --- 配置参数 ---
-const TARGET_URL = 'https://hub.weirdhost.xyz/dashboard';
+const CHROME_PATH = "/usr/bin/google-chrome";
+const USER_DATA_DIR = '/tmp/chrome_user_data';
 const DEBUG_PORT = 9222;
-const SCREENSHOT_DIR = path.join(process.cwd(), 'screenshots');
-if (!fs.existsSync(SCREENSHOT_DIR)) fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
 
-const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
-const TG_CHAT_ID = process.env.TG_CHAT_ID;
-
-/**
- * 注入脚本：在页面所有 Frame 中运行，监听 Turnstile 复选框
- */
+// --- 你原始代码中的注入脚本 ---
 const INJECTED_SCRIPT = `
 (function() {
-    const findCheckbox = () => {
-        // 尝试在所有 Shadow Root 中查找
-        const allElements = document.querySelectorAll('*');
-        for (const el of allElements) {
-            if (el.shadowRoot) {
-                const cb = el.shadowRoot.querySelector('input[type="checkbox"]');
-                if (cb) {
-                    const rect = cb.getBoundingClientRect();
-                    if (rect.width > 0 && rect.height > 0) {
-                        window.__turnstile_data = {
-                            xRatio: (rect.left + rect.width / 2) / window.innerWidth,
-                            yRatio: (rect.top + rect.height / 2) / window.innerHeight
-                        };
-                        return true;
+    if (window.self === window.top) return;
+    try {
+        const originalAttachShadow = Element.prototype.attachShadow;
+        Element.prototype.attachShadow = function(init) {
+            const shadowRoot = originalAttachShadow.call(this, init);
+            if (shadowRoot) {
+                const checkAndReport = () => {
+                    const checkbox = shadowRoot.querySelector('input[type="checkbox"]');
+                    if (checkbox) {
+                        const rect = checkbox.getBoundingClientRect();
+                        if (rect.width > 0 && rect.height > 0 && window.innerWidth > 0 && window.innerHeight > 0) {
+                            const xRatio = (rect.left + rect.width / 2) / window.innerWidth;
+                            const yRatio = (rect.top + rect.height / 2) / window.innerHeight;
+                            window.__turnstile_data = { xRatio, yRatio };
+                            return true;
+                        }
                     }
+                    return false;
+                };
+                if (!checkAndReport()) {
+                    const observer = new MutationObserver(() => {
+                        if (checkAndReport()) observer.disconnect();
+                    });
+                    observer.observe(shadowRoot, { childList: true, subtree: true });
                 }
             }
-        }
-        return false;
-    };
-    setInterval(findCheckbox, 1000);
+            return shadowRoot;
+        };
+    } catch (e) { }
 })();
 `;
 
-async function notify(msg, imgPath = null) {
-    console.log(`[Notification] ${msg}`);
-    if (!TG_BOT_TOKEN || !TG_CHAT_ID) return;
-    try {
-        const url = `https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`;
-        await axios.post(url, { chat_id: TG_CHAT_ID, text: msg, parse_mode: 'Markdown' });
-        if (imgPath && fs.existsSync(imgPath)) {
-            const cmd = `curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendPhoto" -F chat_id="${TG_CHAT_ID}" -F photo="@${imgPath}"`;
-            execSync(cmd);
-        }
-    } catch (e) { console.error('[TG] Failed to send notification'); }
+// 辅助函数：检测端口是否开放
+function checkPort(port) {
+    return new Promise((resolve) => {
+        const req = http.get(`http://localhost:${port}/json/version`, (res) => resolve(true));
+        req.on('error', () => resolve(false));
+        req.end();
+    });
 }
 
-async function solveTurnstile(page) {
-    console.log('   >> 正在探测 Turnstile 验证码...');
-    for (let i = 0; i < 20; i++) {
-        const frames = page.frames();
-        for (const frame of frames) {
+// 核心功能：CDP 模拟点击 Turnstile
+async function attemptTurnstileCdp(page) {
+    const frames = page.frames();
+    for (const frame of frames) {
+        try {
             const data = await frame.evaluate(() => window.__turnstile_data).catch(() => null);
             if (data) {
-                try {
-                    const iframe = await frame.frameElement();
-                    const box = await iframe.boundingBox();
-                    if (box) {
-                        const x = box.x + box.width * data.xRatio;
-                        const y = box.y + box.height * data.yRatio;
-                        const client = await page.context().newCDPSession(page);
-                        // CDP 原生模拟点击
-                        await client.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
-                        await new Promise(r => setTimeout(r, 100));
-                        await client.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
-                        await client.detach();
-                        console.log(`   >> ✅ 坐标点击成功: (${x.toFixed(0)}, ${y.toFixed(0)})`);
-                        return true;
-                    }
-                } catch (e) {}
+                const iframeElement = await frame.frameElement();
+                if (!iframeElement) continue;
+                const box = await iframeElement.boundingBox();
+                if (!box) continue;
+
+                const clickX = box.x + (box.width * data.xRatio);
+                const clickY = box.y + (box.height * data.yRatio);
+
+                const client = await page.context().newCDPSession(page);
+                await client.send('Input.dispatchMouseEvent', {
+                    type: 'mousePressed', x: clickX, y: clickY, button: 'left', clickCount: 1
+                });
+                await new Promise(r => setTimeout(r, 100));
+                await client.send('Input.dispatchMouseEvent', {
+                    type: 'mouseReleased', x: clickX, y: clickY, button: 'left', clickCount: 1
+                });
+                await client.detach();
+                return true;
             }
-        }
-        await page.waitForTimeout(1500);
+        } catch (e) { }
     }
     return false;
 }
 
 (async () => {
-    let accounts = [];
+    // 获取用户数据
+    let users = [];
     try {
-        accounts = JSON.parse(process.env.USERS_JSON || '[]');
+        users = JSON.parse(process.env.USERS_JSON || '[]');
     } catch (e) {
-        console.error('❌ USERS_JSON 解析错误');
+        console.error('USERS_JSON 解析失败');
         process.exit(1);
     }
 
-    if (accounts.length === 0) {
-        console.log('⚠️ 没有发现待处理的账户');
-        process.exit(0);
-    }
-
-    // --- 启动并连接 Chrome ---
-    let chromePath;
-    try {
-        chromePath = execSync('which google-chrome').toString().trim();
-    } catch (e) {
-        chromePath = '/usr/bin/google-chrome'; // 备用路径
-    }
-    
-    console.log(`🚀 启动 Chrome: ${chromePath}`);
-    const chrome = spawn(chromePath, [
+    // 1. 启动原生 Chrome
+    console.log('🚀 启动 Chrome...');
+    const chrome = spawn(CHROME_PATH, [
         `--remote-debugging-port=${DEBUG_PORT}`,
+        `--user-data-dir=${USER_DATA_DIR}`,
         '--no-sandbox',
-        '--disable-setuid-sandbox',
         '--disable-gpu',
         '--disable-dev-shm-usage',
-        '--user-data-dir=/tmp/chrome_user_data',
-        '--window-size=1280,720',
-        '--remote-debugging-address=0.0.0.0' // 关键：允许连接
-    ], { stdio: 'ignore', detached: true });
+        '--remote-debugging-address=0.0.0.0'
+    ], { detached: true, stdio: 'ignore' });
     chrome.unref();
 
+    // 2. 连接并等待初始化
     let browser;
-    for (let i = 0; i < 15; i++) {
-        try {
-            // 关键：强制 127.0.0.1 避免 IPv6 解析错误
-            browser = await chromium.connectOverCDP(`http://127.0.0.1:${DEBUG_PORT}`);
-            console.log('✅ 成功连接到 Chrome 调试端口');
-            break;
-        } catch (e) {
-            console.log(`⏳ 等待 Chrome 初始化 (${i+1}/15)...`);
-            await new Promise(r => setTimeout(r, 2000));
+    for (let i = 0; i < 20; i++) {
+        if (await checkPort(DEBUG_PORT)) {
+            try {
+                browser = await chromium.connectOverCDP(`http://127.0.0.1:${DEBUG_PORT}`);
+                break;
+            } catch (e) { }
         }
+        await new Promise(r => setTimeout(r, 1000));
     }
 
     if (!browser) {
-        console.error('❌ 无法连接到 Chrome，程序退出');
+        console.error('❌ Chrome 连接失败');
         process.exit(1);
     }
 
     const context = browser.contexts()[0];
+    const page = await context.newPage();
+    await page.addInitScript(INJECTED_SCRIPT);
 
-    for (const acc of accounts) {
-        const safeName = acc.username.replace(/[^a-z0-9]/gi, '_');
-        console.log(`\n--- 账户处理中: ${acc.username} ---`);
-        
-        const page = await context.newPage();
-        page.setDefaultTimeout(60000);
-        await page.addInitScript(INJECTED_SCRIPT);
+    for (let i = 0; i < users.length; i++) {
+        const user = users[i];
+        // 关键修复：防止因读取不到 username 导致的 replace 报错
+        const currentName = user.username || user.user || `Account_${i}`;
+        console.log(`\n=== 正在处理账户: ${currentName} ===`);
 
         try {
-            // 1. 注入 Cookie (必须设置 domain)
-            if (acc.cookies && Array.isArray(acc.cookies)) {
-                await context.addCookies(acc.cookies.map(c => ({
+            // 注入 Cookie 实现登录
+            if (user.cookies) {
+                await context.addCookies(user.cookies.map(c => ({
                     ...c,
                     domain: 'hub.weirdhost.xyz'
                 })));
-                console.log('   >> Cookies 注入成功');
+                console.log('   >> Cookies 已注入');
             }
 
-            await page.goto(TARGET_URL, { waitUntil: 'networkidle' });
+            await page.goto('https://hub.weirdhost.xyz/dashboard', { waitUntil: 'networkidle' });
 
-            // 检查是否跳转回登录页
-            if (page.url().includes('/login')) {
-                console.log('   >> ❌ Cookie 已失效，无法登录');
-                continue;
-            }
-
-            // 2. 查找 Renew 按钮
-            const renewBtn = page.locator('button:has-text("Renew")').first();
-            try {
-                await renewBtn.waitFor({ state: 'visible', timeout: 15000 });
-            } catch (e) {}
+            // 检查 Renew 按钮
+            const renewBtn = page.getByRole('button', { name: 'Renew', exact: true }).first();
+            try { await renewBtn.waitFor({ state: 'visible', timeout: 10000 }); } catch (e) {}
 
             if (await renewBtn.isVisible()) {
                 await renewBtn.click();
-                console.log('   >> 已点击 Renew 按钮，等待模态框...');
+                console.log('   >> 已点击 Renew 按钮');
 
-                // 3. 处理 Turnstile 验证码
-                const solved = await solveTurnstile(page);
-                if (!solved) console.log('   >> ⚠️ 未探测到验证码或点击失败，尝试直接确认...');
+                // 绕过 Turnstile
+                let solved = false;
+                for (let attempt = 0; attempt < 15; attempt++) {
+                    solved = await attemptTurnstileCdp(page);
+                    if (solved) {
+                        console.log('   >> ✅ Turnstile 点击成功');
+                        break;
+                    }
+                    await page.waitForTimeout(1000);
+                }
 
                 await page.waitForTimeout(3000);
-                const preShot = path.join(SCREENSHOT_DIR, `${safeName}_modal.png`);
-                await page.screenshot({ path: preShot });
 
-                // 4. 点击最终确认 Renew
+                // 点击最终确认
                 const confirmBtn = page.locator('#renew-modal button:has-text("Renew")');
                 if (await confirmBtn.isVisible()) {
                     await confirmBtn.click();
-                    console.log('   >> 最终确认按钮已点击');
-                    
-                    await page.waitForTimeout(5000);
-                    const finalShot = path.join(SCREENSHOT_DIR, `${safeName}_result.png`);
-                    await page.screenshot({ path: finalShot, fullPage: true });
-
-                    // 判断结果
-                    const successMsg = page.getByText('successfully');
-                    if (await successMsg.isVisible()) {
-                        await notify(`✅ *${acc.username}* 续期成功！`, finalShot);
-                    } else {
-                        await notify(`❓ *${acc.username}* 续期动作已完成，请检查截图确认结果`, finalShot);
-                    }
+                    console.log('   >> 最终确认已点击');
+                    await page.waitForTimeout(4000);
                 }
             } else {
-                console.log('   >> ℹ️ 未发现 Renew 按钮（可能已经续期过）');
+                console.log('   >> 未发现 Renew 按钮（可能已续期或 Cookie 无效）');
             }
         } catch (err) {
-            console.error(`   >> ❌ 发生错误: ${err.message}`);
-        } finally {
-            await page.close();
+            console.error(`   >> 处理出错: ${err.message}`);
         }
     }
 
     await browser.close();
-    console.log('\n所有任务处理完毕。');
+    console.log('\n任务结束。');
     process.exit(0);
 })();
