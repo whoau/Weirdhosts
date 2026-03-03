@@ -18,7 +18,7 @@ const CHROME_PATH = process.env.CHROME_PATH || '/usr/bin/google-chrome';
 const DEBUG_PORT = 9222;
 process.env.NO_PROXY = 'localhost,127.0.0.1';
 
-// --- 代理配置 ---
+// --- 代理配置省略 ---
 const HTTP_PROXY = process.env.HTTP_PROXY;
 let PROXY_CONFIG = null;
 if (HTTP_PROXY) {
@@ -151,11 +151,9 @@ async function attemptTurnstileCdp(page) {
         let targetUrls = [];
 
         if (account.server_id) {
-            console.log(`>> 读取到专属 Server ID，开启安全直达模式...`);
             targetUrls.push(`${TARGET_URL}server/${account.server_id}`);
         } else {
             console.log(`>> 未配置 Server ID，将尝试在主页抓取...`);
-            // 【修复点 1】：改用 domcontentloaded 并去掉 networkidle
             await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded' });
             await page.waitForTimeout(5000);
             if (page.url().includes('login')) { console.error(`>> ❌ Cookie失效`); continue; }
@@ -165,7 +163,6 @@ async function attemptTurnstileCdp(page) {
 
         if (targetUrls.length === 0) {
             console.log(`>> ⚠️ 没找到服务器地址。`);
-            await page.screenshot({ path: path.join(photoDir, `${accountId}_no_server_found.png`), fullPage: true });
             continue;
         }
 
@@ -174,81 +171,87 @@ async function attemptTurnstileCdp(page) {
             const serverIdSnippet = serverUrl.split('/').pop(); 
             console.log(`\n>> 强行跳转至服务器: ${serverUrl.replace(serverIdSnippet, '********')}`); 
             
-            // 【修复点 2】：改用 domcontentloaded 并去掉 networkidle，防止 WebSocket 导致超时
             await page.goto(serverUrl, { waitUntil: 'domcontentloaded' });
-            await page.waitForTimeout(5000);
+            await page.waitForTimeout(5000); // 等待左侧菜单和CF渲染
 
             if (page.url().includes('login')) {
                 console.error(`>> ❌ Cookie失效，已退回登录页`);
                 break; 
             }
 
-            for (let attempt = 1; attempt <= 3; attempt++) {
-                console.log(`>> 正在寻找 [${RENEW_BTN_TEXT}]...`);
-                const renewBtn = page.locator(`text=${RENEW_BTN_TEXT}`).first();
-                
-                try {
-                    await renewBtn.waitFor({ state: 'visible', timeout: 5000 });
-                    await renewBtn.evaluate(node => node.style.border = '3px solid red');
-                    await page.screenshot({ path: path.join(photoDir, `${accountId}_1_found_button.png`), fullPage: true });
+            // 1. 直接破解页面左侧的 CF 盾
+            console.log(`>> 正在破解左侧栏的 CF Turnstile...`);
+            let cdpClickResult = false;
+            for (let findAttempt = 0; findAttempt < 20; findAttempt++) {
+                cdpClickResult = await attemptTurnstileCdp(page);
+                if (cdpClickResult) break;
+                await page.waitForTimeout(1000);
+            }
 
-                    console.log(`>> 点击续期按钮`);
-                    await renewBtn.click();
-                    await page.waitForTimeout(2000);
+            if (cdpClickResult) {
+                console.log(`>> 已点击 CF，等待验证结果...`);
+            } else {
+                console.log(`>> 未找到需要点击的 CF 框，可能已自动通过或不存在。`);
+            }
 
-                    console.log(`>> 等待弹窗和 CF 盾...`);
-                    await page.screenshot({ path: path.join(photoDir, `${accountId}_2_modal_opened.png`), fullPage: true });
-
-                    let cdpClickResult = false;
-                    for (let findAttempt = 0; findAttempt < 20; findAttempt++) {
-                        cdpClickResult = await attemptTurnstileCdp(page);
-                        if (cdpClickResult) break;
-                        await page.waitForTimeout(1000);
+            // 2. 严密监控 CF 的 "成功" 标志 (支持英文、中文、韩文)
+            let cfSuccess = false;
+            for (let wait = 0; wait < 15; wait++) {
+                const frames = page.frames();
+                for (const f of frames) {
+                    if (f.url().includes('cloudflare')) {
+                        try {
+                            // 根据你截图里的中文 "成功!" 或者英文 "Success" 匹配
+                            if (await f.getByText(/Success!|成功|성공/i).isVisible({ timeout: 500 })) {
+                                cfSuccess = true;
+                                break;
+                            }
+                        } catch (e) {}
                     }
-
-                    if (cdpClickResult) await page.waitForTimeout(5000);
-
-                    const frames = page.frames();
-                    for (const f of frames) {
-                        if (f.url().includes('cloudflare')) {
-                            try {
-                                if (await f.getByText('Success!', { exact: false }).isVisible({ timeout: 1000 })) {
-                                    console.log('>> ✅ CF 验证成功');
-                                    await page.screenshot({ path: path.join(photoDir, `${accountId}_3_cf_success.png`), fullPage: true });
-                                    break;
-                                }
-                            } catch (e) {}
-                        }
-                    }
-
-                    const confirmBtn = page.locator(`button:has-text("${RENEW_BTN_TEXT}")`).last();
-                    if (await confirmBtn.isVisible()) {
-                        await confirmBtn.click();
-                        await page.waitForTimeout(3000);
-                        
-                        if (await page.getByText(/You can't renew|아직 서버를 갱신할 수 없습니다/i).isVisible()) {
-                            console.log(`>> ⏳ 还没到续期时间`);
-                            const skipShot = path.join(photoDir, `${accountId}_4_skip_not_time.png`);
-                            await page.screenshot({ path: skipShot, fullPage: true });
-                            await sendTelegramMessage(`⏳ *暂无法续期*\n账号: ${accountId}`, skipShot);
-                            break;
-                        }
-
-                        console.log('>> ✅ 续期指令已发送！');
-                        const successShot = path.join(photoDir, `${accountId}_5_renew_success.png`);
-                        await page.screenshot({ path: successShot, fullPage: true });
-                        await sendTelegramMessage(`✅ *续期成功*\n账号: ${accountId}`, successShot);
-                        break;
-                    } else {
-                        console.log('>> 未找到弹窗内的确认按钮，可能界面有变');
-                        break;
-                    }
-
-                } catch (e) {
-                    console.log(`>> 没找到续期按钮或报错: ${e.message}`);
-                    await page.screenshot({ path: path.join(photoDir, `${accountId}_error_page.png`), fullPage: true });
-                    break;
                 }
+                if (cfSuccess) break;
+                await page.waitForTimeout(1000);
+            }
+
+            // 【关键点 1】：CF 成功截图！
+            if (cfSuccess) {
+                console.log('>> ✅ CF 验证成功！正在截图...');
+                const cfShotPath = path.join(photoDir, `${accountId}_1_cf_success.png`);
+                await page.screenshot({ path: cfShotPath, fullPage: true });
+                // 如果需要把这步也发到TG，可以取消下面注释
+                // await sendTelegramMessage(`✅ *CF 盾已通过*\n账号: ${accountId}`, cfShotPath);
+            } else {
+                console.log('>> ⚠️ 未明确检测到 CF 成功提示，继续尝试下一步...');
+            }
+
+            // 3. 点击续期按钮
+            console.log(`>> 寻找续期按钮 [${RENEW_BTN_TEXT}]...`);
+            try {
+                // 不再找弹窗，直接在当前页面找这个按钮并点击
+                const renewBtn = page.locator(`text=${RENEW_BTN_TEXT}`).first();
+                await renewBtn.waitFor({ state: 'visible', timeout: 5000 });
+                await renewBtn.click();
+                console.log(`>> 已点击续期按钮，等待服务器响应...`);
+                
+                // 给服务器几秒钟处理续期请求和刷新页面数据
+                await page.waitForTimeout(4000);
+
+                // 4. 判断成功与否
+                if (await page.getByText(/You can't renew|아직 서버를 갱신할 수 없습니다/i).isVisible()) {
+                    console.log(`>> ⏳ 还没到续期时间`);
+                    const skipShot = path.join(photoDir, `${accountId}_2_skip_not_time.png`);
+                    await page.screenshot({ path: skipShot, fullPage: true });
+                    await sendTelegramMessage(`⏳ *暂无法续期*\n账号: ${accountId}`, skipShot);
+                } else {
+                    console.log('>> ✅ 续期完成！');
+                    // 【关键点 2】：最终续期成功截图！
+                    const successShot = path.join(photoDir, `${accountId}_2_renew_success.png`);
+                    await page.screenshot({ path: successShot, fullPage: true });
+                    await sendTelegramMessage(`✅ *续期成功*\n账号: ${accountId}`, successShot);
+                }
+            } catch (e) {
+                console.log(`>> 没找到续期按钮或执行报错: ${e.message}`);
+                await page.screenshot({ path: path.join(photoDir, `${accountId}_error_page.png`), fullPage: true });
             }
         }
     }
