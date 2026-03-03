@@ -7,15 +7,12 @@ const COOKIE_VALUE = process.env.COOKIE_VALUE;
 
 chromium.use(stealth);
 
-// 写入 MD 报告 (在 GitHub Actions 摘要页显示)
+// 写入 MD 报告
 function writeToMd(status, message) {
     const time = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
     const md = `### 🟢 WeirdHost 续期报告\n- **状态**: ${status}\n- **信息**: ${message}\n- **时间**: ${time}\n`;
-    
     fs.writeFileSync('result.md', md);
-    if (process.env.GITHUB_STEP_SUMMARY) {
-        fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, md);
-    }
+    if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, md);
     console.log(`[Report] ${status}: ${message}`);
 }
 
@@ -99,45 +96,56 @@ async function clickTurnstile(page, context) {
     }]);
 
     const page = await context.newPage();
-    page.setDefaultTimeout(60000);
+    page.setDefaultTimeout(60000); // 设置总超时 60秒
     await page.addInitScript(INJECTED_SCRIPT);
 
     try {
         console.log('🔗 访问 Dashboard...');
         await page.goto('https://hub.weirdhost.xyz/', { waitUntil: 'domcontentloaded' });
         
-        // 0. 首页全屏盾处理 (Just a moment)
+        // 0. 首页全屏盾处理
         if ((await page.title()).includes('Just a moment')) {
             console.log('🛡️ 检测到首页全屏盾，尝试通过...');
             await clickTurnstile(page, context);
-            await page.waitForTimeout(3000);
+            await page.waitForTimeout(5000);
         }
 
-        // 1. 检查是否需要登录 (Cookie 失效)
+        // 1. 检查是否需要登录
         if (page.url().includes('login') || (await page.title()).toLowerCase().includes('login')) {
             await page.screenshot({ path: path.join(shotDir, 'error_login.png') });
             throw new Error("Cookie 已失效，跳转到了登录页");
         }
 
-        // 2. 进入服务器详情
-        const serverLink = page.locator('a[href*="/server/"]').first();
-        if (await serverLink.count() > 0) {
-            console.log('🖱️ 点击进入服务器...');
-            await serverLink.click();
-            await page.waitForLoadState('networkidle');
-        } else {
-            // 没找到服务器，截图留证
-            await page.screenshot({ path: path.join(shotDir, 'error_no_server.png') });
-            throw new Error("找不到服务器入口 (可能是列表为空或加载失败)");
+        // ==========================================
+        // ⏳ 关键修改：死等服务器列表加载
+        // ==========================================
+        console.log('⏳ 正在等待服务器列表加载 (最多等待 30 秒)...');
+        try {
+            // 这是一个专门等待元素出现的函数，如果不出现会一直等，直到超时
+            await page.waitForSelector('a[href*="/server/"]', { state: 'visible', timeout: 30000 });
+            console.log('✅ 服务器列表加载完成！');
+        } catch (e) {
+            // 如果等了30秒还没出来，截个图看看是卡住了还是真的没了
+            console.log('❌ 等待超时，未找到服务器。');
+            await page.screenshot({ path: path.join(shotDir, 'error_loading_timeout.png') });
+            throw new Error("服务器列表加载超时 (一直转圈或无服务器)");
         }
 
-        // 缩放页面，防止截图截不全
+        // 2. 点击进入服务器
+        const serverLink = page.locator('a[href*="/server/"]').first();
+        console.log('🖱️ 点击进入服务器...');
+        await serverLink.click();
+        
+        // 进入详情页后，也要等一下加载
+        console.log('⏳ 等待详情页加载...');
+        await page.waitForLoadState('networkidle'); 
+        await page.waitForTimeout(2000); // 再额外等2秒稳一点
+
+        // 缩放页面
         await page.evaluate(() => document.body.style.zoom = '0.75');
-        await page.waitForTimeout(1000);
 
         // 3. 寻找并点击续期按钮
         console.log('⚡ 寻找续期按钮 (시간 추가 / Renew)...');
-        // 同时匹配韩文和英文
         const renewBtns = page.locator('button').filter({ hasText: /시간 추가|Renew|Extend/i });
         
         if (await renewBtns.count() > 0) {
@@ -147,7 +155,7 @@ async function clickTurnstile(page, context) {
             
             // 等待模态框弹出
             try {
-                await page.waitForSelector('.modal.show, .modal-open, [role="dialog"]', { timeout: 6000 });
+                await page.waitForSelector('.modal.show, .modal-open, [role="dialog"]', { timeout: 8000 });
                 await page.waitForTimeout(1000);
             } catch (e) { console.log('⚠️ 模态框似乎未弹出'); }
 
@@ -175,12 +183,12 @@ async function clickTurnstile(page, context) {
             // 📸 截图 2: 结果反馈 (Result)
             // ==========================================
             console.log('⏳ 等待结果反馈...');
-            await page.waitForTimeout(2000); // 等待 SweetAlert 或 Toast
+            await page.waitForTimeout(2000);
             
             console.log('📸 [2/3] 截图: 续期结果');
             await page.screenshot({ path: path.join(shotDir, '2_result.png') });
             
-            // 提取结果文字写入 MD
+            // 提取结果
             let resText = "操作已提交";
             try {
                 const text = await page.locator('.swal2-title, .alert, .toast-body').first().innerText({timeout: 1000});
@@ -191,7 +199,6 @@ async function clickTurnstile(page, context) {
         } else {
             console.log('⚠️ 未找到续期按钮 (无需续期?)');
             writeToMd("跳过", "未找到续期按钮");
-            // 没找到按钮也截一张图
             await page.screenshot({ path: path.join(shotDir, '2_no_button.png') });
         }
 
@@ -202,7 +209,7 @@ async function clickTurnstile(page, context) {
         await page.reload({ waitUntil: 'domcontentloaded' });
         await page.waitForLoadState('networkidle');
         await page.evaluate(() => document.body.style.zoom = '0.75');
-        await page.waitForTimeout(1500);
+        await page.waitForTimeout(2000);
 
         console.log('📸 [3/3] 截图: 最终时间');
         await page.screenshot({ path: path.join(shotDir, '3_time.png') });
@@ -210,7 +217,6 @@ async function clickTurnstile(page, context) {
     } catch (e) {
         console.error(e);
         writeToMd("出错", e.message);
-        // 报错时截图
         await page.screenshot({ path: path.join(shotDir, 'error_final.png') }).catch(()=>{});
         process.exit(1);
     } finally {
