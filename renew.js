@@ -208,3 +208,187 @@ async function attemptTurnstileCdp(page) {
                 return true;
             }
         } catch (e) { }
+    }
+    return false;
+}
+
+// ================= 主逻辑 =================
+
+(async () => {
+    const accounts = getAccounts();
+    if (accounts.length === 0) {
+        console.log('未在 process.env.COOKIES_JSON 中找到账号 Cookie');
+        process.exit(1);
+    }
+
+    if (PROXY_CONFIG && !(await checkProxy())) {
+        console.error('[代理] 代理无效，终止运行。');
+        process.exit(1);
+    }
+
+    await launchChrome();
+
+    console.log(`正在连接 Chrome...`);
+    let browser;
+    for (let k = 0; k < 5; k++) {
+        try {
+            browser = await chromium.connectOverCDP(`http://localhost:${DEBUG_PORT}`);
+            console.log('连接成功！');
+            break;
+        } catch (e) {
+            console.log(`连接尝试 ${k + 1} 失败。2秒后重试...`);
+            await new Promise(r => setTimeout(r, 2000));
+        }
+    }
+
+    if (!browser) {
+        console.error('连接失败。退出。');
+        process.exit(1);
+    }
+
+    const context = browser.contexts()[0];
+    let page = context.pages().length > 0 ? context.pages()[0] : await context.newPage();
+    page.setDefaultTimeout(60000);
+
+    if (PROXY_CONFIG && PROXY_CONFIG.username) {
+        await context.setHTTPCredentials({ username: PROXY_CONFIG.username, password: PROXY_CONFIG.password });
+    } else {
+        await context.setHTTPCredentials(null);
+    }
+
+    await page.addInitScript(INJECTED_SCRIPT);
+    console.log('注入脚本已添加。');
+
+    const photoDir = path.join(process.cwd(), 'screenshots');
+    if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
+
+    for (let i = 0; i < accounts.length; i++) {
+        const account = accounts[i];
+        const accountId = account.id || `account_${i+1}`;
+        console.log(`\n=== 正在处理账号 ${i + 1}/${accounts.length} (${accountId}) ===`);
+
+        try {
+            if (page.isClosed()) {
+                page = await context.newPage();
+                await page.addInitScript(INJECTED_SCRIPT);
+            }
+
+            // 清理上一个账号的会话并注入当前账号的 Cookie
+            await context.clearCookies();
+            if (account.cookies && account.cookies.length > 0) {
+                await context.addCookies(account.cookies);
+                console.log(`>> 已成功注入 Cookie`);
+            } else {
+                console.log(`>> ⚠️ 账号 ${accountId} 没有提供 Cookie 数据，跳过。`);
+                continue;
+            }
+
+            // 前往目标站点仪表盘
+            console.log(`>> 正在访问 ${TARGET_URL}...`);
+            await page.goto(TARGET_URL);
+            await page.waitForTimeout(3000);
+
+            // 检查是否登录失败 (被弹回了 login 页面)
+            if (page.url().includes('login')) {
+                console.error(`>> ❌ 登录失败: Cookie 可能已过期 (${accountId})`);
+                const failShotPath = path.join(photoDir, `${accountId}_cookie_expired.png`);
+                try { await page.screenshot({ path: failShotPath, fullPage: true }); } catch (e) { }
+                await sendTelegramMessage(`❌ *登录失败*\n账号: ${accountId}\n原因: Cookie 可能已失效，请重新提取`, failShotPath);
+                continue;
+            }
+
+            // 如果存在类似 "See" 或者 "Manage" 服务器的中间步骤，这里做一个容错点击
+            // 若页面直接展示 "시간 추가"，则此步会自动跳过
+            try {
+                // 如果网站有中间一层的服务器详情点击，可根据实际情况修改这段，例如找 "관리" (Manage) 等
+                // await page.getByRole('link', { name: 'Manage' }).first().click(); 
+                // await page.waitForTimeout(2000);
+            } catch (e) { }
+
+            let renewSuccess = false;
+            
+            // --- 尝试进行时间追加 (시간 추가) 循环 ---
+            for (let attempt = 1; attempt <= 20; attempt++) {
+                let hasCaptchaError = false;
+                console.log(`\n[尝试 ${attempt}/20] 正在寻找 [${RENEW_BTN_TEXT}] 按钮...`);
+
+                // 模糊匹配包含 '시간 추가' 的按钮
+                const renewBtn = page.getByRole('button', { name: new RegExp(RENEW_BTN_TEXT, 'i') }).first();
+                try {
+                    await renewBtn.waitFor({ state: 'visible', timeout: 5000 });
+                } catch (e) { }
+
+                if (await renewBtn.isVisible()) {
+                    await renewBtn.click();
+                    console.log(`[${RENEW_BTN_TEXT}] 按钮已点击。等待模态框...`);
+
+                    // 等待模态框，这里沿用原有的 selector 或者找对应的对话框
+                    const modal = page.locator('.modal, #renew-modal, dialog').first(); // 增加了兼容性 class
+                    try { await modal.waitFor({ state: 'visible', timeout: 5000 }); } catch (e) {
+                        console.log('模态框未出现？重试中...');
+                        continue;
+                    }
+
+                    // 鼠标晃动增加真实度
+                    try {
+                        const box = await modal.boundingBox();
+                        if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 5 });
+                    } catch (e) { }
+
+                    // --- 处理 Turnstile ---
+                    console.log('正在检查 Turnstile (使用 CDP 绕过)...');
+                    let cdpClickResult = false;
+                    for (let findAttempt = 0; findAttempt < 30; findAttempt++) {
+                        cdpClickResult = await attemptTurnstileCdp(page);
+                        if (cdpClickResult) break;
+                        await page.waitForTimeout(1000);
+                    }
+
+                    if (cdpClickResult) {
+                        console.log('   >> CDP 点击生效。等待 8秒 Cloudflare 检查...');
+                        await page.waitForTimeout(8000);
+                    } else {
+                        console.log('   >> 重试后仍未确认 Turnstile 复选框。');
+                    }
+
+                    // 检查 Turnstile 成功标志
+                    const frames = page.frames();
+                    for (const f of frames) {
+                        if (f.url().includes('cloudflare')) {
+                            try {
+                                if (await f.getByText('Success!', { exact: false }).isVisible({ timeout: 500 })) {
+                                    console.log('   >> 在 Turnstile iframe 中检测到 "Success!"。');
+                                    break;
+                                }
+                            } catch (e) { }
+                        }
+                    }
+
+                    // 准备点击模态框内的确认按钮 (通常也是 "시간 추가" 或者是确认类的词)
+                    // 由于不确定内部按钮具体文本，我们取模态框内可见的带有该文字的按钮，或者直接寻找主按钮
+                    const confirmBtn = modal.getByRole('button', { name: new RegExp(RENEW_BTN_TEXT, 'i') }).first();
+                    
+                    if (await confirmBtn.isVisible()) {
+                        const tsScreenshotName = `${accountId}_Turnstile_${attempt}.png`;
+                        try { await page.screenshot({ path: path.join(photoDir, tsScreenshotName), fullPage: true }); } catch (e) { }
+
+                        console.log(`   >> 点击模态框内的确认按钮...`);
+                        await confirmBtn.click();
+
+                        try {
+                            const startVerifyTime = Date.now();
+                            while (Date.now() - startVerifyTime < 3000) {
+                                // A. 验证码错误检测
+                                if (await page.getByText('Please complete the captcha', { exact: false }).isVisible()) {
+                                    console.log('   >> ⚠️ 检测到验证码错误提示。');
+                                    hasCaptchaError = true;
+                                    break;
+                                }
+
+                                // B. 时间限制错误检测 (可能不同于英文原版，添加了中文和常见英文的正则)
+                                const notTimeLoc = page.getByText(/You can't renew|You will be able to as of|아직 서버를 갱신할 수 없습니다/i);
+                                if (await notTimeLoc.isVisible()) {
+                                    const text = await notTimeLoc.innerText();
+                                    console.log(`   >> ⏳ 暂无法续期，服务器提示: ${text.substring(0, 50)}...`);
+
+                                    const skipShotPath = path
