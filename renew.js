@@ -10,16 +10,13 @@ const http = require('http');
 const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
 const TG_CHAT_ID = process.env.TG_CHAT_ID;
 const TARGET_URL = 'https://hub.weirdhost.xyz/';
-const RENEW_BTN_TEXT = '시간 추가'; // 韩国服务器续期文字
+const RENEW_BTN_TEXT = '시간 추가'; 
 
-// 启用 stealth 插件
 chromium.use(stealth);
 
-// GitHub Actions 环境下的 Chrome 路径 (通常是 google-chrome)
 const CHROME_PATH = process.env.CHROME_PATH || '/usr/bin/google-chrome';
 const DEBUG_PORT = 9222;
 
-// 确保 localhost 不走代理
 process.env.NO_PROXY = 'localhost,127.0.0.1';
 
 // --- 代理配置 ---
@@ -168,9 +165,7 @@ async function launchChrome() {
     }
 }
 
-// === 修改点：通过 Cookie 格式读取账号 ===
 function getAccounts() {
-    // 预期格式: [{"id": "user1", "cookies": [{"name":"session", "value":"xxx", "domain":".weirdhost.xyz", "path":"/"}]}]
     try {
         if (process.env.COOKIES_JSON) {
             const parsed = JSON.parse(process.env.COOKIES_JSON);
@@ -273,22 +268,21 @@ async function attemptTurnstileCdp(page) {
                 await page.addInitScript(INJECTED_SCRIPT);
             }
 
-            // 清理上一个账号的会话并注入当前账号的 Cookie
+            // 清理并注入 Cookie
             await context.clearCookies();
             if (account.cookies && account.cookies.length > 0) {
                 await context.addCookies(account.cookies);
                 console.log(`>> 已成功注入 Cookie`);
             } else {
-                console.log(`>> ⚠️ 账号 ${accountId} 没有提供 Cookie 数据，跳过。`);
+                console.log(`>> ⚠️ 账号 ${accountId} 没有提供 Cookie，跳过。`);
                 continue;
             }
 
-            // 前往目标站点仪表盘
+            // 1. 前往面板仪表盘
             console.log(`>> 正在访问 ${TARGET_URL}...`);
             await page.goto(TARGET_URL);
             await page.waitForTimeout(3000);
 
-            // 检查是否登录失败 (被弹回了 login 页面)
             if (page.url().includes('login')) {
                 console.error(`>> ❌ 登录失败: Cookie 可能已过期 (${accountId})`);
                 const failShotPath = path.join(photoDir, `${accountId}_cookie_expired.png`);
@@ -297,22 +291,29 @@ async function attemptTurnstileCdp(page) {
                 continue;
             }
 
-            // 如果存在类似 "See" 或者 "Manage" 服务器的中间步骤，这里做一个容错点击
-            // 若页面直接展示 "시간 추가"，则此步会自动跳过
+            // 2. 点击进入服务器内部 (匹配面板上的服务器链接)
+            console.log(`>> 正在进入服务器详情页...`);
             try {
-                // 如果网站有中间一层的服务器详情点击，可根据实际情况修改这段，例如找 "관리" (Manage) 等
-                // await page.getByRole('link', { name: 'Manage' }).first().click(); 
-                // await page.waitForTimeout(2000);
-            } catch (e) { }
+                // 翼龙面板的标准服务器链接通常包含 /server/
+                const serverLink = page.locator('a[href*="/server/"]').first();
+                await serverLink.waitFor({ state: 'visible', timeout: 10000 });
+                await serverLink.click();
+                console.log(`>> 已点击进入服务器`);
+                await page.waitForTimeout(3000); // 等待服务器控制台加载
+            } catch (e) {
+                console.log(`>> ⚠️ 未能在仪表盘找到服务器列表，跳过此账号: ${e.message}`);
+                const errorShotPath = path.join(photoDir, `${accountId}_no_server.png`);
+                try { await page.screenshot({ path: errorShotPath, fullPage: true }); } catch (err) {}
+                continue;
+            }
 
             let renewSuccess = false;
             
-            // --- 尝试进行时间追加 (시간 추가) 循环 ---
+            // 3. 尝试寻找时间追加按钮并续期
             for (let attempt = 1; attempt <= 20; attempt++) {
                 let hasCaptchaError = false;
                 console.log(`\n[尝试 ${attempt}/20] 正在寻找 [${RENEW_BTN_TEXT}] 按钮...`);
 
-                // 模糊匹配包含 '시간 추가' 的按钮
                 const renewBtn = page.getByRole('button', { name: new RegExp(RENEW_BTN_TEXT, 'i') }).first();
                 try {
                     await renewBtn.waitFor({ state: 'visible', timeout: 5000 });
@@ -322,20 +323,17 @@ async function attemptTurnstileCdp(page) {
                     await renewBtn.click();
                     console.log(`[${RENEW_BTN_TEXT}] 按钮已点击。等待模态框...`);
 
-                    // 等待模态框，这里沿用原有的 selector 或者找对应的对话框
-                    const modal = page.locator('.modal, #renew-modal, dialog').first(); // 增加了兼容性 class
+                    const modal = page.locator('.modal, #renew-modal, dialog').first();
                     try { await modal.waitFor({ state: 'visible', timeout: 5000 }); } catch (e) {
                         console.log('模态框未出现？重试中...');
                         continue;
                     }
 
-                    // 鼠标晃动增加真实度
                     try {
                         const box = await modal.boundingBox();
                         if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 5 });
                     } catch (e) { }
 
-                    // --- 处理 Turnstile ---
                     console.log('正在检查 Turnstile (使用 CDP 绕过)...');
                     let cdpClickResult = false;
                     for (let findAttempt = 0; findAttempt < 30; findAttempt++) {
@@ -351,21 +349,6 @@ async function attemptTurnstileCdp(page) {
                         console.log('   >> 重试后仍未确认 Turnstile 复选框。');
                     }
 
-                    // 检查 Turnstile 成功标志
-                    const frames = page.frames();
-                    for (const f of frames) {
-                        if (f.url().includes('cloudflare')) {
-                            try {
-                                if (await f.getByText('Success!', { exact: false }).isVisible({ timeout: 500 })) {
-                                    console.log('   >> 在 Turnstile iframe 中检测到 "Success!"。');
-                                    break;
-                                }
-                            } catch (e) { }
-                        }
-                    }
-
-                    // 准备点击模态框内的确认按钮 (通常也是 "시간 추가" 或者是确认类的词)
-                    // 由于不确定内部按钮具体文本，我们取模态框内可见的带有该文字的按钮，或者直接寻找主按钮
                     const confirmBtn = modal.getByRole('button', { name: new RegExp(RENEW_BTN_TEXT, 'i') }).first();
                     
                     if (await confirmBtn.isVisible()) {
@@ -378,14 +361,12 @@ async function attemptTurnstileCdp(page) {
                         try {
                             const startVerifyTime = Date.now();
                             while (Date.now() - startVerifyTime < 3000) {
-                                // A. 验证码错误检测
                                 if (await page.getByText('Please complete the captcha', { exact: false }).isVisible()) {
                                     console.log('   >> ⚠️ 检测到验证码错误提示。');
                                     hasCaptchaError = true;
                                     break;
                                 }
 
-                                // B. 时间限制错误检测 (可能不同于英文原版，添加了中文和常见英文的正则)
                                 const notTimeLoc = page.getByText(/You can't renew|You will be able to as of|아직 서버를 갱신할 수 없습니다/i);
                                 if (await notTimeLoc.isVisible()) {
                                     const text = await notTimeLoc.innerText();
@@ -416,7 +397,6 @@ async function attemptTurnstileCdp(page) {
                             continue;
                         }
 
-                        // 验证是否成功关闭模态框
                         await page.waitForTimeout(2000);
                         if (!await modal.isVisible()) {
                             console.log('   >> ✅ 模态框已关闭。续期成功！');
@@ -438,7 +418,7 @@ async function attemptTurnstileCdp(page) {
                         continue;
                     }
                 } else {
-                    console.log(`未找到 [${RENEW_BTN_TEXT}] 按钮 (服务器可能已续期，或不在该页面)。`);
+                    console.log(`未找到 [${RENEW_BTN_TEXT}] 按钮 (可能已续期，或不在该页面)。`);
                     break;
                 }
             }
@@ -447,7 +427,6 @@ async function attemptTurnstileCdp(page) {
             console.error(`处理账号 ${accountId} 时发生异常:`, err);
         }
 
-        // 保存当前账号最终状态快照
         const finalScreenshotPath = path.join(photoDir, `${accountId}_final.png`);
         try {
             await page.screenshot({ path: finalScreenshotPath, fullPage: true });
