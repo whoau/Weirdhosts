@@ -1,9 +1,14 @@
 {
-  "name": "weirdhost-renew",
+  "name": "weirdhost-auto-renew",
+  "version": "1.0.0",
+  "description": "Auto renew WeirdHost servers",
+  "scripts": {
+    "start": "node renew.js",
+    "local": "node renew_local.js"
+  },
   "dependencies": {
-    "playwright": "^1.40.0",
+    "axios": "^1.7.2",
     "playwright-extra": "^4.3.6",
-    "puppeteer-extra-plugin-stealth": "^2.11.2",
-    "axios": "^1.6.0"
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
   }
 }
